@@ -89,6 +89,42 @@ The mask PNG is usually the same as the source image. Must have alpha channel (R
 python3 animate.py logo.png --prompt "shiny glint sweeps across" --mask logo.png --loop
 ```
 
+## Integrating into Sett Playable Ads
+
+The `@smoud/playable-scripts` webpack config does NOT support `.webm` imports. Use the **base64 data URL workaround**:
+
+1. Encode the WebM as a base64 `.ts` module:
+```bash
+echo "export const VideoDataUrl = 'data:video/webm;base64,$(base64 -i output.webm)';" > src/VideoData.ts
+```
+
+2. Import and create a PixiJS video texture:
+```typescript
+import { VideoDataUrl } from './VideoData';
+import { Texture } from 'pixi.js';
+
+const video = document.createElement('video');
+video.src = VideoDataUrl;
+video.loop = true;
+video.muted = true;
+video.playsInline = true;
+video.preload = 'auto';
+const texture = Texture.from(video, { resourceOptions: { autoPlay: true } });
+```
+
+**Important**: esbuild (used by playable-scripts webpack) does not support `!` non-null assertions. Use `=== null` checks and `as Type` casts instead.
+
+For shared textures (e.g. logo used in multiple UI components), use a singleton pattern with `let sharedTexture: Texture | null = null`.
+
+## VP9 Alpha Encoding Requirements
+
+For transparent WebM output, these FFmpeg flags are **required**:
+- `-pix_fmt yuva420p` — YUVA pixel format with alpha channel
+- `-auto-alt-ref 0` — disables alt-ref frames (required for alpha, otherwise encoder drops alpha)
+- `-metadata:s:v:0 alpha_mode=1` — signals the container has alpha
+
+Input mask PNGs **must** be RGBA format (alpha=0 for transparent, alpha=255 for opaque). The script auto-converts non-RGBA inputs and warns if alpha is flat.
+
 ## Technical Details
 
 For implementation details (seamless looping internals, alpha erosion pipeline, dimension matching, mask FFmpeg two-step process, known limitations), see [references/technical.md](references/technical.md).

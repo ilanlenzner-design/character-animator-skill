@@ -96,6 +96,26 @@ def animate(image_path, prompt, model='kling', asset_type='character', matting='
         print(f"ERROR: Mask image not found: {mask_path}")
         sys.exit(1)
 
+    # Ensure mask PNG is RGBA with proper alpha channel
+    if mask_path:
+        mask_img = Image.open(mask_path)
+        if mask_img.mode != 'RGBA':
+            log("mask", f"Converting mask from {mask_img.mode} to RGBA...")
+            mask_img = mask_img.convert('RGBA')
+            mask_path_rgba = os.path.join(tempfile.mkdtemp(prefix="char-anim-mask-"), 'mask_rgba.png')
+            mask_img.save(mask_path_rgba)
+            mask_img.close()
+            mask_path = mask_path_rgba
+        else:
+            # Validate alpha channel has both transparent and opaque pixels
+            alpha = mask_img.getchannel('A')
+            extrema = alpha.getextrema()
+            mask_img.close()
+            if extrema[0] == extrema[1]:
+                log("warn", f"Mask alpha is flat ({extrema[0]}) — no transparency variation. Output may lack cutout.")
+            else:
+                log("mask", f"RGBA mask OK — alpha range [{extrema[0]}, {extrema[1]}]")
+
     if mask_path:
         total = 3
     elif asset_type == 'background':
@@ -150,6 +170,7 @@ def animate(image_path, prompt, model='kling', asset_type='character', matting='
             mask_img = Image.open(mask_path)
             mask_w, mask_h = mask_img.size
             mask_img.close()
+            log("mask", f"Mask input: {mask_w}x{mask_h}, format confirmed RGBA")
             # Make dimensions even for VP9
             out_w = mask_w + (mask_w % 2)
             out_h = mask_h + (mask_h % 2)

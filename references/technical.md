@@ -50,6 +50,23 @@ Output matches the mask PNG dimensions exactly. The `-shortest` flag ensures the
 
 Do NOT use `--mask` for characters that walk, wave, breathe visibly, or change their outline.
 
+## VP9 Alpha Encoding
+
+VP9 with alpha transparency requires specific FFmpeg flags or the alpha channel will be silently dropped:
+
+| Flag | Purpose |
+|------|---------|
+| `-pix_fmt yuva420p` | YUVA pixel format — the `a` carries the alpha channel |
+| `-auto-alt-ref 0` | **Required** — VP9 alt-ref frames don't support alpha. Without this, encoder silently drops alpha |
+| `-metadata:s:v:0 alpha_mode=1` | WebM container metadata signaling alpha presence |
+
+**Input frame requirements** (for mask mode):
+- Must be RGBA PNG — `alpha=0` for transparent pixels, `alpha=255` for opaque
+- RGB-only PNGs will produce an all-opaque mask (no cutout)
+- The script auto-detects non-RGBA and converts, but warns if alpha has no variation
+
+These flags are already set in all three alpha-encoding paths (character universal, character human, mask).
+
 ## Known Limitations
 
 - **Green-toned subjects**: Chromakey (universal matting) struggles with green characters (e.g. green eyes, foliage). Use `--mask` if edges are static, or `--matting human` if the subject is a person.
