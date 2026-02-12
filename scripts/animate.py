@@ -58,7 +58,7 @@ def log(step, msg):
     print(f"  [{step}] {msg}")
 
 
-def animate(image_path, prompt, model='kling', asset_type='character', matting='universal', duration=5, output_path=None, loop=False):
+def animate(image_path, prompt, model='kling', asset_type='character', matting='universal', duration=5, output_path=None, loop=False, mask_path=None):
     if not os.environ.get('REPLICATE_API_TOKEN'):
         print("ERROR: REPLICATE_API_TOKEN environment variable is required")
         sys.exit(1)
@@ -92,7 +92,13 @@ def animate(image_path, prompt, model='kling', asset_type='character', matting='
     scale = f'scale={oversized_w}:{oversized_h}:force_original_aspect_ratio=decrease,crop={crop_w}:{crop_h}'
     log("size", f"Source: {src_w}x{src_h} → Render: {oversized_w}x{oversized_h} → Crop: {crop_w}x{crop_h}")
 
-    if asset_type == 'background':
+    if mask_path and not os.path.exists(mask_path):
+        print(f"ERROR: Mask image not found: {mask_path}")
+        sys.exit(1)
+
+    if mask_path:
+        total = 3
+    elif asset_type == 'background':
         total = 2
     elif matting == 'human':
         total = 4
@@ -139,7 +145,46 @@ def animate(image_path, prompt, model='kling', asset_type='character', matting='
         download(video_url, generated)
         log("done", "Animation generated!")
 
-        if asset_type == 'background':
+        if mask_path:
+            # ── MASK PATH: use original PNG alpha as mask ──
+            mask_img = Image.open(mask_path)
+            mask_w, mask_h = mask_img.size
+            mask_img.close()
+            # Make dimensions even for VP9
+            out_w = mask_w + (mask_w % 2)
+            out_h = mask_h + (mask_h % 2)
+
+            print(f"\n[2/{total}] Creating alpha mask video from {os.path.basename(mask_path)}...")
+            mask_video = os.path.join(tmpdir, 'mask.mp4')
+            mask_cmd = [
+                'ffmpeg', '-y', '-loop', '1', '-i', mask_path,
+                '-vf', f'alphaextract,scale={out_w}:{out_h}',
+                '-t', '10', '-r', '24',
+                '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
+                mask_video,
+            ]
+            result = subprocess.run(mask_cmd, capture_output=True, text=True, timeout=120)
+            if result.returncode != 0:
+                print(f"ERROR: Mask creation failed:\n{result.stderr[-500:]}")
+                sys.exit(1)
+            log("done", f"Mask video created ({out_w}x{out_h})")
+
+            print(f"\n[3/{total}] Masking video with PNG alpha → transparent VP9...")
+            ffmpeg_cmd = [
+                'ffmpeg', '-y',
+                '-i', generated,
+                '-i', mask_video,
+                '-filter_complex', f'[0:v]scale={out_w}:{out_h}[vid];[vid][1:v]alphamerge[out]',
+                '-map', '[out]',
+                '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p',
+                '-auto-alt-ref', '0', '-b:v', '800k', '-crf', '35',
+                '-speed', '4', '-row-mt', '1',
+                '-metadata:s:v:0', 'alpha_mode=1', '-an',
+                '-shortest',
+                output_path,
+            ]
+
+        elif asset_type == 'background':
             # ── BACKGROUND PATH: no matting, encode for mobile ──
             print(f"\n[2/{total}] Encoding VP9 for mobile (<=720p)...")
             ffmpeg_cmd = [
@@ -237,7 +282,8 @@ if __name__ == '__main__':
     parser.add_argument('--matting', choices=['universal', 'human'], default='universal')
     parser.add_argument('--duration', type=int, choices=[5, 10], default=5)
     parser.add_argument('--loop', action='store_true', help='Use start_image == end_image for seamless loop (Kling v2.5)')
+    parser.add_argument('--mask', help='PNG with alpha channel to use as shape mask (skips AI bg removal)')
     parser.add_argument('--output', help='Output file path')
     args = parser.parse_args()
 
-    animate(args.image, args.prompt, args.model, args.asset_type, args.matting, args.duration, args.output, args.loop)
+    animate(args.image, args.prompt, args.model, args.asset_type, args.matting, args.duration, args.output, args.loop, args.mask)

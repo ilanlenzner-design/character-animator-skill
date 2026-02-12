@@ -25,6 +25,11 @@ Animate a still image into a mobile-optimized VP9 WebM video. Characters get alp
 Image + Prompt → AI Video Gen → AI Background Removal → VP9 WebM + alpha (<=720p)
 ```
 
+**Mask** (use original PNG alpha as shape mask):
+```
+Image + Prompt → AI Video Gen → PNG Alpha Mask → VP9 WebM + alpha
+```
+
 **Background** (full frame, no matting):
 ```
 Image + Prompt → AI Video Gen → VP9 WebM encode (<=720p)
@@ -53,6 +58,7 @@ REPLICATE_API_TOKEN=$REPLICATE_API_TOKEN python3 ~/.claude/skills/character-anim
 - `--matting`: `universal` (any subject) or `human` (people only, better temporal consistency). Ignored when `--type background`.
 - `--duration`: `5` or `10` seconds (default: 5)
 - `--loop`: Enable seamless loop (Kling only). Uses `end_image == start_image` with `mode=pro` so the last frame matches the first frame. **Recommended for all character animations** that need to loop continuously (game sprites, ad assets).
+- `--mask`: Path to a PNG with alpha channel to use as shape mask. Skips AI background removal entirely — uses the PNG's exact silhouette to cut the animated video. Ideal for logos, UI elements, or any asset where the original shape must be preserved pixel-perfectly. Output matches the mask PNG dimensions.
 - `--output`: Output path (default: `<input>-animated.webm`)
 
 ## Automatic Dimension Matching
@@ -80,6 +86,29 @@ For universal matting (chromakey path), the pipeline uses alpha erosion to elimi
 - **Character**: Removes background → transparent VP9 WebM with alpha. Use for sprites, characters, objects that overlay on other content.
 - **Background**: No background removal → full-frame VP9 WebM. Use for scene backgrounds, landscapes, environments.
 
+## PNG Alpha Mask Mode (`--mask`)
+
+When `--mask` is provided, the script skips AI background removal entirely and instead uses the original PNG's alpha channel as a per-frame mask. This is useful when:
+- **Logos and UI elements**: AI bg removal changes the shape (Kling tends to fill the frame). The mask preserves the exact original silhouette.
+- **Subjects with green tones**: Chromakey struggles with green-ish characters (e.g. green eyes, foliage). The mask bypasses chromakey completely.
+- **Pixel-perfect shape matching**: The output matches the mask PNG dimensions exactly — no shape distortion.
+
+**IMPORTANT**: Mask mode only works well when the subject's edges are static (not moving). The mask is a single static shape applied to every frame. If the character's limbs, hair, or silhouette changes between frames, the mask will clip the moving parts. Use `--mask` for:
+- Logos (static shape, internal animation like shine/glow)
+- UI buttons/badges (static outline, internal pulse/shimmer)
+- Objects with fixed boundaries (the animation is internal, edges don't move)
+
+Do NOT use `--mask` for characters that walk, wave, breathe visibly, or change their outline.
+
+The mask PNG is usually the same as the source image (e.g. `--mask logo.png` when animating `logo.png`). The PNG must have an alpha channel (RGBA mode).
+
+Pipeline: `AI Video Gen → Scale to mask size → Apply PNG alpha → VP9 WebM + alpha`
+
+Example:
+```bash
+python3 animate.py logo.png --prompt "shiny glint sweeps across" --mask logo.png --loop
+```
+
 ## Matting Mode Selection (characters only)
 
 - **Universal (RMBG)**: Use for non-human subjects — animals, creatures, objects, game characters. Uses `nateraw/video-background-remover` → FFmpeg chromakey.
@@ -96,12 +125,13 @@ For universal matting (chromakey path), the pipeline uses alpha erosion to elimi
 ## Workflow
 
 1. Ask user for the image path and animation prompt
-2. Determine if the output needs background removal (alpha channel):
-   - **Obvious character/sprite** (e.g. "animate this character", subject on plain/white bg): use `--type character`
-   - **Obvious background/scene** (e.g. "animate this background", landscape, environment): use `--type background`
-   - **Ambiguous** (e.g. "animate this image" with no context): **ask the user** — "Does this need background removal (transparent output), or should it keep the full frame?"
-3. For characters, determine matting mode if not obvious:
-   - Human/person in the image → `--matting human`
+2. Determine the transparency approach:
+   - **Logo / UI element / static-edge asset** (e.g. game logo, button, badge — edges don't move): use `--mask <same_image.png>`. This preserves the exact original shape.
+   - **Character/sprite with moving edges** (e.g. animal blinking, person waving): use `--type character` (AI bg removal)
+   - **Background/scene** (e.g. landscape, environment): use `--type background` (no bg removal)
+   - **Ambiguous**: **ask the user**
+3. For `--type character` (AI bg removal), determine matting mode:
+   - Human/person → `--matting human`
    - Anything else (creature, object, animal) → `--matting universal`
    - If unsure, ask
 4. **Default to `--loop`** for character sprites and game assets (seamless looping is almost always desired)
