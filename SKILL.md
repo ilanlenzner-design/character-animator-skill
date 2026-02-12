@@ -16,24 +16,13 @@ description: >
 
 # Character Animator
 
-Animate a still image into a mobile-optimized VP9 WebM video. Characters get alpha transparency; backgrounds get full-frame encoding. Output is <=720p for mobile ads.
+Animate a still image into a mobile-optimized VP9 WebM video (<=720p). Three pipelines:
 
-## Pipeline
-
-**Character** (transparent output):
-```
-Image + Prompt → AI Video Gen → AI Background Removal → VP9 WebM + alpha (<=720p)
-```
-
-**Mask** (use original PNG alpha as shape mask):
-```
-Image + Prompt → AI Video Gen → PNG Alpha Mask → VP9 WebM + alpha
-```
-
-**Background** (full frame, no matting):
-```
-Image + Prompt → AI Video Gen → VP9 WebM encode (<=720p)
-```
+| Mode | Pipeline | Use for |
+|------|----------|---------|
+| **Character** | Image → AI Video → AI BG Removal → VP9+alpha | Sprites, characters, objects needing transparency |
+| **Mask** | Image → AI Video → PNG Alpha Mask → VP9+alpha | Logos, UI elements with static edges |
+| **Background** | Image → AI Video → VP9 encode | Scenes, landscapes, environments |
 
 ## Usage
 
@@ -51,90 +40,55 @@ REPLICATE_API_TOKEN=$REPLICATE_API_TOKEN python3 ~/.claude/skills/character-anim
 
 ## Parameters
 
-- `image_path` (required): Path to image (PNG, JPG, WEBP)
-- `--prompt` (required): Describe the animation (e.g. "cute cartoon cat blinks eyes slowly, smiles, tiny head nod, stays perfectly still in place, no walking, no movement, stationary")
-- `--type`: `character` (transparent output, default) or `background` (full frame, no bg removal)
-- `--model`: `kling` (best quality, default) or `minimax` (faster)
-- `--matting`: `universal` (any subject) or `human` (people only, better temporal consistency). Ignored when `--type background`.
-- `--duration`: `5` or `10` seconds (default: 5)
-- `--loop`: Enable seamless loop (Kling only). Uses `end_image == start_image` with `mode=pro` so the last frame matches the first frame. **Recommended for all character animations** that need to loop continuously (game sprites, ad assets).
-- `--mask`: Path to a PNG with alpha channel to use as shape mask. Skips AI background removal entirely — uses the PNG's exact silhouette to cut the animated video. Ideal for logos, UI elements, or any asset where the original shape must be preserved pixel-perfectly. Output matches the mask PNG dimensions.
-- `--output`: Output path (default: `<input>-animated.webm`)
+| Parameter | Values | Default | Notes |
+|-----------|--------|---------|-------|
+| `image_path` | PNG/JPG/WEBP path | (required) | |
+| `--prompt` | string | (required) | Describe the animation |
+| `--type` | `character`, `background` | `character` | character = transparent, background = full frame |
+| `--model` | `kling`, `minimax` | `kling` | kling = best quality, minimax = faster |
+| `--matting` | `universal`, `human` | `universal` | universal = any subject, human = people only (better temporal consistency). Ignored for background |
+| `--duration` | `5`, `10` | `5` | Seconds |
+| `--loop` | flag | off | Seamless loop (Kling only). First frame = last frame via `end_image` |
+| `--mask` | PNG path | none | Use PNG alpha as shape mask. Skips AI bg removal. **Static edges only** |
+| `--output` | file path | `<input>-animated.webm` | |
 
-## Automatic Dimension Matching
+## Prompt Best Practices
 
-The script automatically reads the source image dimensions using Pillow and outputs the video at the same size (capped at 720p). It renders 15% oversized then center-crops to absorb AI-generated zoom drift. No manual scaling needed.
+- **Stationary characters**: Always include "stays perfectly still in place, no walking, no movement, stationary, no zoom, no camera movement"
+- **Subtle motions work best**: "blinks eyes slowly, smiles, tiny head nod"
+- Example: `"cute cartoon hamster blinks eyes slowly, smiles, tiny head nod, stays perfectly still in place, no walking, no movement, stationary"`
 
-## Seamless Looping (First Frame = Last Frame)
+## Workflow
 
-When `--loop` is enabled (Kling only), the script passes the same source image as both `start_image` and `end_image` to Kling v2.1. This forces the AI to generate a video where the first and last frames match the original image, creating a seamless loop when played back with `video.loop = true`. This requires Kling's `mode=pro` (automatically set by the script).
+1. Get image path and animation prompt from user
+2. Determine transparency approach:
+   - **Logo / UI / static-edge asset** (edges don't move) → `--mask <same_image.png>`
+   - **Character/sprite** (moving edges) → `--type character`
+   - **Background/scene** → `--type background`
+   - **Ambiguous** → ask the user
+3. For `--type character`, determine matting:
+   - Human/person → `--matting human`
+   - Anything else → `--matting universal`
+4. Default to `--loop` for game sprites and ad assets
+5. Verify `REPLICATE_API_TOKEN` is set
+6. Run `animate.py`
+7. Report output path and file size
 
-- **Without `--loop`**: The character may drift, walk, or change pose — the last frame won't match the first, causing a visible jump on loop.
-- **With `--loop`**: The character returns to its original pose/position. Perfect for game sprites and ad assets that loop continuously.
-- **Kling only**: MiniMax does not support `end_image`. If seamless looping is needed, use `--model kling`.
+## Mask Mode Constraints
 
-## Alpha Erosion (Green Fringe Removal)
+`--mask` applies a single static PNG alpha shape to every frame. Only use when edges are static:
+- Logos (internal shine/glow, static outline)
+- UI buttons/badges (internal pulse/shimmer)
+- Objects with fixed boundaries
 
-For universal matting (chromakey path), the pipeline uses alpha erosion to eliminate green fringe artifacts:
-1. Chromakey removes green background
-2. Alpha channel is extracted and eroded by 1px (cuts off green edge pixels)
-3. Eroded alpha is merged back with RGB
-4. Color channel mixer removes residual green spill
+Do NOT use for characters that walk, wave, breathe visibly, or change their silhouette.
 
-## Asset Type Selection
+The mask PNG is usually the same as the source image. Must have alpha channel (RGBA).
 
-- **Character**: Removes background → transparent VP9 WebM with alpha. Use for sprites, characters, objects that overlay on other content.
-- **Background**: No background removal → full-frame VP9 WebM. Use for scene backgrounds, landscapes, environments.
-
-## PNG Alpha Mask Mode (`--mask`)
-
-When `--mask` is provided, the script skips AI background removal entirely and instead uses the original PNG's alpha channel as a per-frame mask. This is useful when:
-- **Logos and UI elements**: AI bg removal changes the shape (Kling tends to fill the frame). The mask preserves the exact original silhouette.
-- **Subjects with green tones**: Chromakey struggles with green-ish characters (e.g. green eyes, foliage). The mask bypasses chromakey completely.
-- **Pixel-perfect shape matching**: The output matches the mask PNG dimensions exactly — no shape distortion.
-
-**IMPORTANT**: Mask mode only works well when the subject's edges are static (not moving). The mask is a single static shape applied to every frame. If the character's limbs, hair, or silhouette changes between frames, the mask will clip the moving parts. Use `--mask` for:
-- Logos (static shape, internal animation like shine/glow)
-- UI buttons/badges (static outline, internal pulse/shimmer)
-- Objects with fixed boundaries (the animation is internal, edges don't move)
-
-Do NOT use `--mask` for characters that walk, wave, breathe visibly, or change their outline.
-
-The mask PNG is usually the same as the source image (e.g. `--mask logo.png` when animating `logo.png`). The PNG must have an alpha channel (RGBA mode).
-
-Pipeline: `AI Video Gen → Scale to mask size → Apply PNG alpha → VP9 WebM + alpha`
-
-Example:
 ```bash
 python3 animate.py logo.png --prompt "shiny glint sweeps across" --mask logo.png --loop
 ```
 
-## Matting Mode Selection (characters only)
+## Technical Details
 
-- **Universal (RMBG)**: Use for non-human subjects — animals, creatures, objects, game characters. Uses `nateraw/video-background-remover` → FFmpeg chromakey.
-- **Human (RVM)**: Use for people/human characters only. Uses `arielreplicate/robust_video_matting` for better temporal consistency and less flicker. Takes longer (2 API calls vs 1).
-
-## Prompt Best Practices
-
-- **Always include** "stays perfectly still in place, no walking, no movement, stationary" for characters that should not translate
-- **Always include** "no zoom, no camera movement" to prevent AI zoom drift (the script also compensates with 15% oversized render + crop)
-- **Describe subtle motions**: "blinks eyes slowly, smiles, tiny head nod" — small facial animations work best
-- **Use `--loop` for game sprites and ad assets** — ensures seamless looping by matching first and last frames
-- Example prompt: `"cute cartoon hamster blinks eyes slowly, smiles, tiny head nod, stays perfectly still in place, no walking, no movement, stationary"`
-
-## Workflow
-
-1. Ask user for the image path and animation prompt
-2. Determine the transparency approach:
-   - **Logo / UI element / static-edge asset** (e.g. game logo, button, badge — edges don't move): use `--mask <same_image.png>`. This preserves the exact original shape.
-   - **Character/sprite with moving edges** (e.g. animal blinking, person waving): use `--type character` (AI bg removal)
-   - **Background/scene** (e.g. landscape, environment): use `--type background` (no bg removal)
-   - **Ambiguous**: **ask the user**
-3. For `--type character` (AI bg removal), determine matting mode:
-   - Human/person → `--matting human`
-   - Anything else (creature, object, animal) → `--matting universal`
-   - If unsure, ask
-4. **Default to `--loop`** for character sprites and game assets (seamless looping is almost always desired)
-5. Verify REPLICATE_API_TOKEN is set in environment
-6. Run the animate.py script
-7. Report the output path and file size
+For implementation details (seamless looping internals, alpha erosion pipeline, dimension matching, mask FFmpeg two-step process, known limitations), see [references/technical.md](references/technical.md).
