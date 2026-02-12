@@ -29,11 +29,13 @@ import time
 try:
     import replicate
     import requests
+    from PIL import Image
 except ImportError:
     print("Installing required packages...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "replicate", "requests", "-q"])
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "replicate", "requests", "Pillow", "-q"])
     import replicate
     import requests
+    from PIL import Image
 
 
 def get_url(output):
@@ -56,7 +58,7 @@ def log(step, msg):
     print(f"  [{step}] {msg}")
 
 
-def animate(image_path, prompt, model='kling', asset_type='character', matting='universal', duration=5, output_path=None):
+def animate(image_path, prompt, model='kling', asset_type='character', matting='universal', duration=5, output_path=None, loop=False):
     if not os.environ.get('REPLICATE_API_TOKEN'):
         print("ERROR: REPLICATE_API_TOKEN environment variable is required")
         sys.exit(1)
@@ -73,8 +75,22 @@ def animate(image_path, prompt, model='kling', asset_type='character', matting='
         base = os.path.splitext(os.path.basename(image_path))[0]
         output_path = os.path.join(os.path.dirname(os.path.abspath(image_path)), f"{base}-animated.webm")
 
-    # Mobile ad encoding: <=720p, low bitrate
-    scale = 'scale=min(iw\\,720):min(ih\\,720):force_original_aspect_ratio=decrease'
+    # Match output dimensions to source image (capped at 720p for mobile)
+    # Render 15% oversized then center-crop to absorb AI-generated zoom drift
+    src = Image.open(image_path)
+    src_w, src_h = src.size
+    src.close()
+    cap_w = min(src_w, 720)
+    cap_h = min(src_h, 720)
+    oversized_w = int(cap_w * 1.15)
+    oversized_h = int(cap_h * 1.15)
+    # Make dimensions even (required by VP9)
+    oversized_w += oversized_w % 2
+    oversized_h += oversized_h % 2
+    crop_w = cap_w + (cap_w % 2)
+    crop_h = cap_h + (cap_h % 2)
+    scale = f'scale={oversized_w}:{oversized_h}:force_original_aspect_ratio=decrease,crop={crop_w}:{crop_h}'
+    log("size", f"Source: {src_w}x{src_h} → Render: {oversized_w}x{oversized_h} → Crop: {crop_w}x{crop_h}")
 
     if asset_type == 'background':
         total = 2
@@ -100,6 +116,10 @@ def animate(image_path, prompt, model='kling', asset_type='character', matting='
                 'cfg_scale': 0.5,
                 'aspect_ratio': '16:9',
             }
+            if loop:
+                params['end_image'] = open(image_path, 'rb')
+                params['mode'] = 'pro'
+                log("loop", "Using start_image == end_image for seamless loop (mode=pro)")
         elif model == 'minimax':
             model_id = 'minimax/video-01'
             params = {
@@ -126,7 +146,7 @@ def animate(image_path, prompt, model='kling', asset_type='character', matting='
                 'ffmpeg', '-y', '-i', generated,
                 '-vf', scale,
                 '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuv420p',
-                '-b:v', '600k', '-crf', '36', '-row-mt', '1', '-an',
+                '-b:v', '600k', '-crf', '36', '-speed', '4', '-row-mt', '1', '-an',
                 output_path,
             ]
 
@@ -158,6 +178,7 @@ def animate(image_path, prompt, model='kling', asset_type='character', matting='
                 '-map', '[merged]',
                 '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p',
                 '-auto-alt-ref', '0', '-b:v', '800k', '-crf', '35',
+                '-speed', '4', '-row-mt', '1',
                 '-metadata:s:v:0', 'alpha_mode=1', '-an',
                 output_path,
             ]
@@ -173,18 +194,26 @@ def animate(image_path, prompt, model='kling', asset_type='character', matting='
             download(get_url(bg_out), green_path)
             log("done", "Background removed!")
 
-            print(f"\n[3/{total}] Chromakey to transparent VP9 for mobile...")
+            print(f"\n[3/{total}] Chromakey + alpha erosion to transparent VP9...")
+            # Chromakey → split → erode alpha 1px to kill green fringe → merge back → despill → scale
+            chroma_filter = (
+                f'chromakey=0x00FF00:0.28:0.02,split[rgb][a];'
+                f'[a]alphaextract,erosion=threshold0=255:threshold1=255:threshold2=255:threshold3=255[amask];'
+                f'[rgb][amask]alphamerge,colorchannelmixer=gg=0.8:gb=0.1:gr=0.1,{scale}[out]'
+            )
             ffmpeg_cmd = [
                 'ffmpeg', '-y',
                 '-i', green_path,
-                '-vf', f'chromakey=0x00FF00:0.15:0.1,{scale}',
+                '-filter_complex', chroma_filter,
+                '-map', '[out]',
                 '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p',
                 '-auto-alt-ref', '0', '-b:v', '800k', '-crf', '35',
+                '-speed', '4', '-row-mt', '1',
                 '-metadata:s:v:0', 'alpha_mode=1', '-an',
                 output_path,
             ]
 
-        result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=120)
+        result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=600)
         if result.returncode != 0:
             print(f"ERROR: FFmpeg failed:\n{result.stderr[-500:]}")
             sys.exit(1)
@@ -207,7 +236,8 @@ if __name__ == '__main__':
                         help='character = transparent output, background = full frame')
     parser.add_argument('--matting', choices=['universal', 'human'], default='universal')
     parser.add_argument('--duration', type=int, choices=[5, 10], default=5)
+    parser.add_argument('--loop', action='store_true', help='Use start_image == end_image for seamless loop (Kling v2.5)')
     parser.add_argument('--output', help='Output file path')
     args = parser.parse_args()
 
-    animate(args.image, args.prompt, args.model, args.asset_type, args.matting, args.duration, args.output)
+    animate(args.image, args.prompt, args.model, args.asset_type, args.matting, args.duration, args.output, args.loop)
