@@ -145,6 +145,28 @@ const texture = Texture.from(video, { resourceOptions: { autoPlay: true } });
 
 For shared textures (e.g. logo used in multiple UI components), use a singleton pattern with `let sharedTexture: Texture | null = null`.
 
+### Video Background Scaling (Landscape Bug Fix)
+
+Video textures can have **different dimensions** from the original static image (backgrounds cap at 1080p, characters at 720p). Also, video textures can briefly report their size as **0** while decoding frames. Both cause black bars or flickering on orientation change.
+
+**Always** use the known video dimensions as constants (from the script's output log) instead of reading them from the texture at runtime:
+
+```typescript
+// Known video dimensions from animate.py output log
+const VIDEO_W = 960;
+const VIDEO_H = 960;
+
+// Scale to cover screen — never read width/height from the video texture
+public resize(width: number, height: number, scale: number): void {
+  const bgScale = Math.max(width / (VIDEO_W * scale), height / (VIDEO_H * scale)) * 1.1;
+  this.background.scale.set(bgScale);
+}
+```
+
+This avoids both issues:
+- No dimension mismatch (you know the exact output size)
+- No division-by-zero when the video briefly reports 0x0 during frame decode
+
 ## VP9 Alpha Encoding Requirements
 
 For transparent WebM output, these FFmpeg flags are **required**:

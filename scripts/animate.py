@@ -187,7 +187,8 @@ def animate(image_path, prompt, model='kling', asset_type='character', method='a
         base = os.path.splitext(os.path.basename(image_path))[0]
         output_path = os.path.join(os.path.dirname(os.path.abspath(image_path)), f"{base}-animated.webm")
 
-    # Match output dimensions to source image (capped at 720p for mobile)
+    # Match output dimensions to source image
+    # Characters capped at 720p for mobile; backgrounds use source dims (must fill screen)
     # Render 15% oversized then center-crop to absorb AI-generated zoom drift
     src = Image.open(image_path)
     src_w, src_h = src.size
@@ -197,8 +198,9 @@ def animate(image_path, prompt, model='kling', asset_type='character', method='a
         alpha_range = alpha.getextrema()
         has_alpha = alpha_range[0] != alpha_range[1]  # flat alpha = no real transparency
     src.close()
-    cap_w = min(src_w, 720)
-    cap_h = min(src_h, 720)
+    max_dim = 1080 if asset_type == 'background' else 720
+    cap_w = min(src_w, max_dim)
+    cap_h = min(src_h, max_dim)
     oversized_w = int(cap_w * 1.15)
     oversized_h = int(cap_h * 1.15)
     # Make dimensions even (required by VP9)
