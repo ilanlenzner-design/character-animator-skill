@@ -150,11 +150,26 @@ def bake_background(image_path, key_color, dest_path):
     bg.close()
 
 
+MOTION_PRESETS = {
+    'subtle': 0.3,     # logos, UI elements — very minimal animation
+    'normal': 0.5,     # stationary characters — gentle movement
+    'expressive': 0.7, # characters with clear gestures, breathing, blinking
+    'dynamic': 0.9,    # action-heavy: jumping, dancing, waving
+}
+
+
 def animate(image_path, prompt, model='kling', asset_type='character', method='auto',
-            subject=None, duration=5, output_path=None, loop=None, mask_path=None):
+            subject=None, duration=5, output_path=None, loop=None, mask_path=None,
+            motion='auto'):
     # Default: backgrounds always loop unless explicitly disabled
     if loop is None:
         loop = asset_type == 'background'
+
+    # Resolve motion preset -> cfg_scale
+    if motion == 'auto':
+        motion = 'expressive' if asset_type == 'background' else 'normal'
+    cfg_scale = MOTION_PRESETS.get(motion, 0.5)
+    log("motion", f"Motion: {motion} (cfg_scale={cfg_scale})")
 
     if not os.environ.get('REPLICATE_API_TOKEN'):
         print("ERROR: REPLICATE_API_TOKEN environment variable is required")
@@ -279,7 +294,7 @@ def animate(image_path, prompt, model='kling', asset_type='character', method='a
                 'duration': int(duration),
                 'mode': 'standard',
                 'negative_prompt': 'blurry, distorted, low quality, watermark',
-                'cfg_scale': 0.5,
+                'cfg_scale': cfg_scale,
                 'aspect_ratio': '16:9',
             }
             if loop:
@@ -439,9 +454,13 @@ if __name__ == '__main__':
                             help='Force seamless loop (default for backgrounds)')
     loop_group.add_argument('--no-loop', action='store_false', dest='loop',
                             help='Disable looping (override default for backgrounds)')
+    parser.add_argument('--motion', choices=['auto', 'subtle', 'normal', 'expressive', 'dynamic'],
+                        default='auto',
+                        help='Animation intensity: subtle (0.3), normal (0.5), expressive (0.7), dynamic (0.9). '
+                             'auto = normal for characters, expressive for backgrounds')
     parser.add_argument('--mask', help='PNG with alpha channel to use as shape mask (skips AI bg removal)')
     parser.add_argument('--output', help='Output file path')
     args = parser.parse_args()
 
     animate(args.image, args.prompt, args.model, args.asset_type, args.method,
-            args.subject, args.duration, args.output, args.loop, args.mask)
+            args.subject, args.duration, args.output, args.loop, args.mask, args.motion)

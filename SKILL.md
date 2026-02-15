@@ -34,6 +34,7 @@ REPLICATE_API_TOKEN=$REPLICATE_API_TOKEN python3 ~/.claude/skills/character-anim
     --type character \
     --model kling \
     --duration 5 \
+    --motion expressive \
     --loop \
     --output output.webm
 ```
@@ -48,6 +49,7 @@ REPLICATE_API_TOKEN=$REPLICATE_API_TOKEN python3 ~/.claude/skills/character-anim
 | `--method` | `auto`, `chromakey`, `sam3` | `auto` | auto = chromakey if RGBA or solid-color bg, SAM3 only if complex bg |
 | `--model` | `kling`, `minimax` | `kling` | kling = best quality, minimax = faster |
 | `--subject` | string | `"character"` | SAM3 segmentation prompt (only for `--method sam3`) |
+| `--motion` | `auto`, `subtle`, `normal`, `expressive`, `dynamic` | `auto` | Controls animation intensity via cfg_scale. auto = `normal` for characters, `expressive` for backgrounds |
 | `--duration` | `5`, `10` | `5` | Seconds |
 | `--loop` | flag | **on** for backgrounds, off for characters | Seamless loop (Kling only). Use `--no-loop` to disable |
 | `--mask` | PNG path | none | Use PNG alpha as shape mask. Skips AI bg removal. **Static edges only** |
@@ -64,11 +66,24 @@ When the source image has an alpha channel (RGBA PNG), the script automatically:
 This produces sharper edges, more consistent frames, and no flickering compared to SAM3.
 No extra API call is needed (SAM3 is skipped entirely).
 
+## Motion Presets
+
+| Preset | cfg_scale | Best for | Prompt style |
+|--------|-----------|----------|-------------|
+| `subtle` | 0.3 | Logos, UI elements, gentle shimmer | "subtle glow", "faint sparkle" |
+| `normal` | 0.5 | Stationary characters, idle animation | "blinks slowly, tiny head nod" |
+| `expressive` | 0.7 | Characters with clear gestures, backgrounds | "breathes deeply, looks around, smiles" |
+| `dynamic` | 0.9 | Action poses, dancing, waving, jumping | "waves excitedly, bounces up and down" |
+
+If the animation comes out too subtle, bump up `--motion` one level (e.g., `normal` -> `expressive`).
+
 ## Prompt Best Practices
 
 - **Stationary characters**: Always include "stays perfectly still in place, no walking, no movement, stationary, no zoom, no camera movement"
-- **Subtle motions work best**: "blinks eyes slowly, smiles, tiny head nod"
-- Example: `"cute cartoon hamster blinks eyes slowly, smiles, tiny head nod, stays perfectly still in place, no walking, no movement, stationary"`
+- **More motion**: Use action verbs and `--motion expressive` or `--motion dynamic`: "breathes deeply, blinks eyes, looks around curiously, smiles warmly"
+- **Subtle motions**: Use `--motion subtle` or `--motion normal`: "blinks eyes slowly, tiny head nod"
+- Example (normal): `"cute cartoon hamster blinks eyes slowly, smiles, tiny head nod, stays perfectly still in place, stationary"`
+- Example (expressive): `"cute cartoon hamster breathes deeply, blinks eyes, looks around, shifts weight, stays in place, stationary"`
 
 ## Workflow
 
@@ -81,10 +96,12 @@ No extra API call is needed (SAM3 is skipped entirely).
    - **Background/scene** -> `--type background`
    - **Ambiguous** -> ask the user
 3. For `--method sam3`, set `--subject` to describe what SAM3 should segment
-4. Default to `--loop` for game sprites and ad assets
-5. Verify `REPLICATE_API_TOKEN` is set
-6. Run `animate.py`
-7. Report output path and file size
+4. Choose motion level based on desired animation intensity (default `auto` is usually fine)
+5. Default to `--loop` for game sprites and ad assets
+6. Verify `REPLICATE_API_TOKEN` is set
+7. Run `animate.py`
+8. If animation is too subtle, re-run with `--motion expressive` or `--motion dynamic`
+9. Report output path and file size
 
 ## Mask Mode Constraints
 
