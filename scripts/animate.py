@@ -10,7 +10,7 @@ Usage:
 Options:
     --prompt       Animation prompt (required)
     --model        Video model: kling | minimax (default: kling)
-    --matting       Matting mode: universal | human (default: universal)
+    --subject      SAM3 segmentation prompt (default: auto-detected from image)
     --duration     Video duration: 5 | 10 seconds (default: 5)
     --output       Output file path (default: <input_name>-animated.webm)
 
@@ -24,7 +24,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
 
 try:
     import replicate
@@ -58,7 +57,7 @@ def log(step, msg):
     print(f"  [{step}] {msg}")
 
 
-def animate(image_path, prompt, model='kling', asset_type='character', matting='universal', duration=5, output_path=None, loop=False, mask_path=None):
+def animate(image_path, prompt, model='kling', asset_type='character', subject=None, duration=5, output_path=None, loop=False, mask_path=None):
     if not os.environ.get('REPLICATE_API_TOKEN'):
         print("ERROR: REPLICATE_API_TOKEN environment variable is required")
         sys.exit(1)
@@ -120,10 +119,8 @@ def animate(image_path, prompt, model='kling', asset_type='character', matting='
         total = 3
     elif asset_type == 'background':
         total = 2
-    elif matting == 'human':
-        total = 4
     else:
-        total = 3
+        total = 3  # character: generate → SAM3 mask → alphamerge
 
     tmpdir = tempfile.mkdtemp(prefix="char-anim-")
 
@@ -216,66 +213,35 @@ def animate(image_path, prompt, model='kling', asset_type='character', matting='
                 output_path,
             ]
 
-        elif matting == 'human':
-            # ── HUMAN CHARACTER PATH ──
-            print(f"\n[2/{total}] Extracting alpha mask (human RVM)...")
-            alpha_out = replicate.run(
-                'arielreplicate/robust_video_matting:73d2128a371922d5d1abf0712a1d974be0e4e2358cc1218e4e34714767232bac',
-                input={'input_video': open(generated, 'rb'), 'output_type': 'alpha-mask'}
-            )
-            alpha_path = os.path.join(tmpdir, 'alpha.mp4')
-            download(get_url(alpha_out), alpha_path)
-            log("done", "Alpha mask extracted!")
-
-            print(f"\n[3/{total}] Extracting foreground...")
-            fg_out = replicate.run(
-                'arielreplicate/robust_video_matting:73d2128a371922d5d1abf0712a1d974be0e4e2358cc1218e4e34714767232bac',
-                input={'input_video': open(generated, 'rb'), 'output_type': 'foreground-mask'}
-            )
-            fg_path = os.path.join(tmpdir, 'foreground.mp4')
-            download(get_url(fg_out), fg_path)
-            log("done", "Foreground extracted!")
-
-            print(f"\n[4/{total}] Compositing transparent VP9 for mobile...")
-            ffmpeg_cmd = [
-                'ffmpeg', '-y',
-                '-i', fg_path, '-i', alpha_path,
-                '-filter_complex', f'[0:v][1:v]alphamerge,{scale}[merged]',
-                '-map', '[merged]',
-                '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p',
-                '-auto-alt-ref', '0', '-b:v', '800k', '-crf', '35',
-                '-speed', '4', '-row-mt', '1',
-                '-metadata:s:v:0', 'alpha_mode=1', '-an',
-                output_path,
-            ]
-
         else:
-            # ── UNIVERSAL CHARACTER PATH ──
-            print(f"\n[2/{total}] Removing background (universal RMBG)...")
-            bg_out = replicate.run(
-                'nateraw/video-background-remover:ac5c138171b04413a69222c304f67c135e259d46089fc70ef12da685b3c604aa',
-                input={'video': open(generated, 'rb')}
+            # ── CHARACTER PATH: SAM3 Video segmentation ──
+            sam_prompt = subject or 'character'
+            print(f"\n[2/{total}] Segmenting subject with SAM3 (prompt: '{sam_prompt}')...")
+            sam_out = replicate.run(
+                'lucataco/sam3-video:8cbab4c2a3133e679b5b863b80527f6b5c751ec7b33681b7e0b7c79c749df961',
+                input={
+                    'video': open(generated, 'rb'),
+                    'prompt': sam_prompt,
+                    'mask_only': True,
+                }
             )
-            green_path = os.path.join(tmpdir, 'green.mp4')
-            download(get_url(bg_out), green_path)
-            log("done", "Background removed!")
+            mask_video_path = os.path.join(tmpdir, 'sam3_mask.mp4')
+            download(get_url(sam_out), mask_video_path)
+            log("done", "SAM3 mask extracted!")
 
-            print(f"\n[3/{total}] Chromakey + alpha erosion to transparent VP9...")
-            # Chromakey → split → erode alpha 1px to kill green fringe → merge back → despill → scale
-            chroma_filter = (
-                f'chromakey=0x00FF00:0.28:0.02,split[rgb][a];'
-                f'[a]alphaextract,erosion=threshold0=255:threshold1=255:threshold2=255:threshold3=255[amask];'
-                f'[rgb][amask]alphamerge,colorchannelmixer=gg=0.8:gb=0.1:gr=0.1,{scale}[out]'
-            )
+            print(f"\n[3/{total}] Alphamerge + VP9 encoding for mobile...")
             ffmpeg_cmd = [
                 'ffmpeg', '-y',
-                '-i', green_path,
-                '-filter_complex', chroma_filter,
+                '-i', generated,
+                '-i', mask_video_path,
+                '-filter_complex',
+                f'[0:v]{scale}[vid];[1:v]{scale}[mask];[vid][mask]alphamerge[out]',
                 '-map', '[out]',
                 '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p',
                 '-auto-alt-ref', '0', '-b:v', '800k', '-crf', '35',
                 '-speed', '4', '-row-mt', '1',
                 '-metadata:s:v:0', 'alpha_mode=1', '-an',
+                '-shortest',
                 output_path,
             ]
 
@@ -300,11 +266,12 @@ if __name__ == '__main__':
     parser.add_argument('--model', choices=['kling', 'minimax'], default='kling')
     parser.add_argument('--type', dest='asset_type', choices=['character', 'background'], default='character',
                         help='character = transparent output, background = full frame')
-    parser.add_argument('--matting', choices=['universal', 'human'], default='universal')
+    parser.add_argument('--subject', default=None,
+                        help='SAM3 segmentation prompt (e.g. "person", "animal", "car"). Default: "character"')
     parser.add_argument('--duration', type=int, choices=[5, 10], default=5)
     parser.add_argument('--loop', action='store_true', help='Use start_image == end_image for seamless loop (Kling v2.5)')
     parser.add_argument('--mask', help='PNG with alpha channel to use as shape mask (skips AI bg removal)')
     parser.add_argument('--output', help='Output file path')
     args = parser.parse_args()
 
-    animate(args.image, args.prompt, args.model, args.asset_type, args.matting, args.duration, args.output, args.loop, args.mask)
+    animate(args.image, args.prompt, args.model, args.asset_type, args.subject, args.duration, args.output, args.loop, args.mask)

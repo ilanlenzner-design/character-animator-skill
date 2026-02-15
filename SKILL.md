@@ -20,7 +20,7 @@ Animate a still image into a mobile-optimized VP9 WebM video (<=720p). Three pip
 
 | Mode | Pipeline | Use for |
 |------|----------|---------|
-| **Character** | Image → AI Video → AI BG Removal → VP9+alpha | Sprites, characters, objects needing transparency |
+| **Character** | Image → AI Video → SAM3 segmentation → VP9+alpha | Sprites, characters, objects needing transparency |
 | **Mask** | Image → AI Video → PNG Alpha Mask → VP9+alpha | Logos, UI elements with static edges |
 | **Background** | Image → AI Video → VP9 encode | Scenes, landscapes, environments |
 
@@ -32,7 +32,7 @@ REPLICATE_API_TOKEN=$REPLICATE_API_TOKEN python3 ~/.claude/skills/character-anim
     --prompt "description of animation" \
     --type character \
     --model kling \
-    --matting universal \
+    --subject "character" \
     --duration 5 \
     --loop \
     --output output.webm
@@ -46,7 +46,7 @@ REPLICATE_API_TOKEN=$REPLICATE_API_TOKEN python3 ~/.claude/skills/character-anim
 | `--prompt` | string | (required) | Describe the animation |
 | `--type` | `character`, `background` | `character` | character = transparent, background = full frame |
 | `--model` | `kling`, `minimax` | `kling` | kling = best quality, minimax = faster |
-| `--matting` | `universal`, `human` | `universal` | universal = any subject, human = people only (better temporal consistency). Ignored for background |
+| `--subject` | string | `"character"` | SAM3 segmentation prompt. Examples: `"person"`, `"animal"`, `"car"`, `"hamster"` |
 | `--duration` | `5`, `10` | `5` | Seconds |
 | `--loop` | flag | off | Seamless loop (Kling only). First frame = last frame via `end_image` |
 | `--mask` | PNG path | none | Use PNG alpha as shape mask. Skips AI bg removal. **Static edges only** |
@@ -66,9 +66,10 @@ REPLICATE_API_TOKEN=$REPLICATE_API_TOKEN python3 ~/.claude/skills/character-anim
    - **Character/sprite** (moving edges) → `--type character`
    - **Background/scene** → `--type background`
    - **Ambiguous** → ask the user
-3. For `--type character`, determine matting:
-   - Human/person → `--matting human`
-   - Anything else → `--matting universal`
+3. For `--type character`, set `--subject` to describe what SAM3 should segment:
+   - Person → `--subject "person"`
+   - Animal → `--subject "animal"` or be specific: `"hamster"`, `"fox"`
+   - Default `"character"` works for most game sprites
 4. Default to `--loop` for game sprites and ad assets
 5. Verify `REPLICATE_API_TOKEN` is set
 6. Run `animate.py`

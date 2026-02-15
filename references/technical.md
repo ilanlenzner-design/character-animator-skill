@@ -2,9 +2,10 @@
 
 ## Table of Contents
 - [Seamless Looping](#seamless-looping)
-- [Alpha Erosion (Green Fringe)](#alpha-erosion)
+- [SAM3 Video Segmentation](#sam3-video-segmentation)
 - [Automatic Dimension Matching](#dimension-matching)
 - [PNG Alpha Mask Deep-Dive](#mask-deep-dive)
+- [VP9 Alpha Encoding](#vp9-alpha-encoding)
 - [Known Limitations](#known-limitations)
 
 ## Seamless Looping
@@ -15,13 +16,22 @@ When `--loop` is enabled (Kling only), the script passes the same source image a
 - **With `--loop`**: Character returns to original pose/position. Perfect for game sprites and ad assets.
 - **Kling only**: MiniMax does not support `end_image`. Use `--model kling` for loops.
 
-## Alpha Erosion
+## SAM3 Video Segmentation
 
-For universal matting (chromakey path), the pipeline uses alpha erosion to eliminate green fringe:
-1. Chromakey removes green background (`0x00FF00`, similarity=0.28, blend=0.02)
-2. Alpha channel extracted and eroded by 1px (kills green edge pixels)
-3. Eroded alpha merged back with RGB
-4. Color channel mixer removes residual green spill (`gg=0.8, gb=0.1, gr=0.1`)
+Character transparency uses SAM3 (Segment Anything Model 3) for video segmentation via `lucataco/sam3-video` on Replicate. This replaced the previous chromakey pipeline which had green fringe artifacts and failed on green-toned subjects.
+
+**Pipeline**: Video → SAM3 `mask_only=True` → B&W mask video → FFmpeg `alphamerge` → VP9+alpha
+
+**Key parameters**:
+- `prompt`: Text describing the subject to segment (e.g. "character", "person", "animal")
+- `mask_only=True`: Returns a black-and-white mask video (white = subject, black = background)
+- `negative_prompt`: (optional) Text for objects to exclude from the mask
+
+**Advantages over chromakey**:
+- No green fringe artifacts — proper segmentation boundaries
+- Works with any color subject (green foxes, foliage, etc.)
+- Temporal consistency — SAM3 tracks objects across frames
+- Simpler pipeline — no erosion, despill, or color correction needed
 
 ## Dimension Matching
 
@@ -69,7 +79,7 @@ These flags are already set in all three alpha-encoding paths (character univers
 
 ## Known Limitations
 
-- **Green-toned subjects**: Chromakey (universal matting) struggles with green characters (e.g. green eyes, foliage). Use `--mask` if edges are static, or `--matting human` if the subject is a person.
-- **Fox-type characters**: Very green-toned cartoon animals may not produce clean transparency with any matting mode. Consider keeping as static PNG.
+- **SAM3 prompt sensitivity**: The `--subject` prompt affects segmentation quality. Be specific (e.g. `"hamster"` not `"character"`) for best results.
 - **Kling frame-filling**: Kling tends to expand subjects to fill the frame, especially logos/panels. Use `--mask` for logos to preserve the original shape.
 - **MiniMax no looping**: MiniMax does not support `end_image`, so `--loop` is Kling-only.
+- **Multi-subject scenes**: SAM3 may struggle if multiple similar objects are in frame. Use `negative_prompt` to exclude unwanted objects if needed.
