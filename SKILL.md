@@ -16,14 +16,14 @@ description: >
 
 # Character Animator
 
-Animate a still image into a mobile-optimized VP9 WebM video (<=720p). Four pipelines:
+Animate a still image into a mobile-optimized VP9 WebM video. Four pipelines:
 
-| Mode | Pipeline | Use for |
-|------|----------|---------|
-| **Chromakey** (default for RGBA) | Scan image -> bake key color bg -> AI Video -> chromakey -> VP9+alpha | Characters/sprites with alpha channel (best quality) |
-| **SAM3** (fallback for JPG/WEBP) | Image -> AI Video -> SAM3 segmentation -> VP9+alpha | Characters without alpha (JPG, WEBP) |
-| **Mask** | Image -> AI Video -> PNG Alpha Mask -> VP9+alpha | Logos, UI elements with static edges |
-| **Background** | Image -> AI Video -> VP9 encode | Scenes, landscapes, environments |
+| Mode | Use for | Transparency |
+|------|---------|-------------|
+| **Chromakey** (default for RGBA / solid-bg) | Characters, sprites | Auto — bakes key color, chromakeys out |
+| **SAM3** (fallback) | Characters on complex backgrounds (JPG/WEBP) | AI segmentation |
+| **Mask** | Logos, UI elements with static edges | Static PNG alpha shape |
+| **Background** | Scenes, landscapes, environments | None (opaque) |
 
 ## Usage
 
@@ -49,134 +49,50 @@ REPLICATE_API_TOKEN=$REPLICATE_API_TOKEN python3 ~/.claude/skills/character-anim
 | `--method` | `auto`, `chromakey`, `sam3` | `auto` | auto = chromakey if RGBA or solid-color bg, SAM3 only if complex bg |
 | `--model` | `kling`, `minimax` | `kling` | kling = best quality, minimax = faster |
 | `--subject` | string | `"character"` | SAM3 segmentation prompt (only for `--method sam3`) |
-| `--motion` | `auto`, `subtle`, `normal`, `expressive`, `dynamic` | `auto` | Controls animation intensity via cfg_scale. auto = `normal` for characters, `expressive` for backgrounds |
+| `--motion` | `auto`, `subtle`, `normal`, `expressive`, `dynamic` | `auto` | Animation intensity. auto = `normal` for characters, `expressive` for backgrounds |
 | `--duration` | `5`, `10` | `5` | Seconds |
 | `--loop` | flag | **on** for backgrounds, off for characters | Seamless loop (Kling only). Use `--no-loop` to disable |
-| `--size` | `WxH` (e.g. `960x960`) | source dims | Output video dimensions. Use for backgrounds that must match the ad size exactly |
-| `--mask` | PNG path | none | Use PNG alpha as shape mask. Skips AI bg removal. **Static edges only** |
+| `--size` | `WxH` (e.g. `960x960`) | source dims | Output dimensions. Use for backgrounds that must match the ad size |
+| `--mask` | PNG path | none | Static PNG alpha shape. **Static edges only** — logos, UI elements |
 | `--output` | file path | `<input>-animated.webm` | |
-
-## How Chromakey Works
-
-When the source image has an alpha channel (RGBA PNG), the script automatically:
-1. **Scans** the opaque pixels to find the color most distant from any pixel in the image
-2. **Bakes** the character onto a flat background of that color (e.g., cyan for a green character)
-3. **Generates** the AI video with the baked image as `start_image` (and `end_image` for loops)
-4. **Chromakeys** the key color out with FFmpeg `chromakey` filter -> transparent VP9
-
-This produces sharper edges, more consistent frames, and no flickering compared to SAM3.
-No extra API call is needed (SAM3 is skipped entirely).
-
-## Motion Presets
-
-| Preset | cfg_scale | Best for | Prompt style |
-|--------|-----------|----------|-------------|
-| `subtle` | 0.3 | Logos, UI elements, gentle shimmer | "subtle glow", "faint sparkle" |
-| `normal` | 0.5 | Stationary characters, idle animation | "blinks slowly, tiny head nod" |
-| `expressive` | 0.7 | Characters with clear gestures, backgrounds | "breathes deeply, looks around, smiles" |
-| `dynamic` | 0.9 | Action poses, dancing, waving, jumping | "waves excitedly, bounces up and down" |
-
-If the animation comes out too subtle, bump up `--motion` one level (e.g., `normal` -> `expressive`).
-
-## Prompt Best Practices
-
-- **Stationary characters**: Always include "stays perfectly still in place, no walking, no movement, stationary, no zoom, no camera movement"
-- **More motion**: Use action verbs and `--motion expressive` or `--motion dynamic`: "breathes deeply, blinks eyes, looks around curiously, smiles warmly"
-- **Subtle motions**: Use `--motion subtle` or `--motion normal`: "blinks eyes slowly, tiny head nod"
-- Example (normal): `"cute cartoon hamster blinks eyes slowly, smiles, tiny head nod, stays perfectly still in place, stationary"`
-- Example (expressive): `"cute cartoon hamster breathes deeply, blinks eyes, looks around, shifts weight, stays in place, stationary"`
 
 ## Workflow
 
 1. Get image path and animation prompt from user
 2. Determine transparency approach:
-   - **RGBA PNG character/sprite** -> auto-chromakey (default, best quality)
-   - **JPG/WEBP with solid-color background** (green screen, etc.) -> auto-detects bg color, chromakeys it out directly
-   - **JPG/WEBP with complex background** -> `--method sam3` with `--subject` describing the character
-   - **Logo / UI / static-edge asset** (edges don't move) -> `--mask <same_image.png>`
-   - **Background/scene** -> `--type background` (use `--size WxH` to match the ad dimensions)
+   - **RGBA PNG** -> auto-chromakey (best quality, no extra API call)
+   - **JPG/WEBP with solid-color bg** (green screen, etc.) -> auto-detects, chromakeys directly
+   - **JPG/WEBP with complex bg** -> `--method sam3` with `--subject` describing the character
+   - **Logo / UI / static-edge asset** -> `--mask <same_image.png>`
+   - **Background/scene** -> `--type background` (use `--size WxH` to match ad dimensions)
    - **Ambiguous** -> ask the user
-3. For `--method sam3`, set `--subject` to describe what SAM3 should segment
-4. Choose motion level based on desired animation intensity (default `auto` is usually fine)
+3. For `--method sam3`, set `--subject` to describe what to segment (be specific: `"hamster"` > `"character"`)
+4. Choose motion level if needed (default `auto` is usually fine)
 5. Default to `--loop` for game sprites and ad assets
 6. Verify `REPLICATE_API_TOKEN` is set
 7. Run `animate.py`
 8. If animation is too subtle, re-run with `--motion expressive` or `--motion dynamic`
 9. Report output path and file size
 
-## Mask Mode Constraints
+## Motion Presets
 
-`--mask` applies a single static PNG alpha shape to every frame. Only use when edges are static:
-- Logos (internal shine/glow, static outline)
-- UI buttons/badges (internal pulse/shimmer)
-- Objects with fixed boundaries
+Controls Kling's `cfg_scale` — higher = more movement, lower = closer to source frame:
 
-Do NOT use for characters that walk, wave, breathe visibly, or change their silhouette.
+| Preset | cfg_scale | Use for |
+|--------|-----------|---------|
+| `subtle` | 0.3 | Logos, UI — minimal animation |
+| `normal` | 0.5 | Stationary characters — gentle idle |
+| `expressive` | 0.7 | Clear gestures, backgrounds |
+| `dynamic` | 0.9 | Action: jumping, dancing, waving |
 
-The mask PNG is usually the same as the source image. Must have alpha channel (RGBA).
+## Prompt Best Practices
 
-```bash
-python3 animate.py logo.png --prompt "shiny glint sweeps across" --mask logo.png --loop
-```
+- **Stationary characters**: Always append "stays perfectly still in place, no walking, no movement, stationary, no zoom, no camera movement"
+- **More motion**: Use action verbs + `--motion expressive`/`dynamic`: "breathes deeply, blinks eyes, looks around curiously"
+- **Subtle**: `--motion subtle`/`normal`: "blinks eyes slowly, tiny head nod"
+- **Mask mode**: "shiny glint sweeps across", "faint sparkle" — internal animation only
 
-## Integrating into Sett Playable Ads
+## References
 
-The `@smoud/playable-scripts` webpack config does NOT support `.webm` imports. Use the **base64 data URL workaround**:
-
-1. Encode the WebM as a base64 `.ts` module:
-```bash
-echo "export const VideoDataUrl = 'data:video/webm;base64,$(base64 -i output.webm)';" > src/VideoData.ts
-```
-
-2. Import and create a PixiJS video texture:
-```typescript
-import { VideoDataUrl } from './VideoData';
-import { Texture } from 'pixi.js';
-
-const video = document.createElement('video');
-video.src = VideoDataUrl;
-video.loop = true;
-video.muted = true;
-video.playsInline = true;
-video.preload = 'auto';
-const texture = Texture.from(video, { resourceOptions: { autoPlay: true } });
-```
-
-**Important**: esbuild (used by playable-scripts webpack) does not support `!` non-null assertions. Use `=== null` checks and `as Type` casts instead.
-
-For shared textures (e.g. logo used in multiple UI components), use a singleton pattern with `let sharedTexture: Texture | null = null`.
-
-### Video Background Scaling (Landscape Bug Fix)
-
-Video textures can have **different dimensions** from the original static image (backgrounds cap at 1080p, characters at 720p). Also, video textures can briefly report their size as **0** while decoding frames. Both cause black bars or flickering on orientation change.
-
-**Always** use the known video dimensions as constants (from the script's output log) instead of reading them from the texture at runtime:
-
-```typescript
-// Known video dimensions from animate.py output log
-const VIDEO_W = 960;
-const VIDEO_H = 960;
-
-// Scale to cover screen — never read width/height from the video texture
-public resize(width: number, height: number, scale: number): void {
-  const bgScale = Math.max(width / (VIDEO_W * scale), height / (VIDEO_H * scale)) * 1.1;
-  this.background.scale.set(bgScale);
-}
-```
-
-This avoids both issues:
-- No dimension mismatch (you know the exact output size)
-- No division-by-zero when the video briefly reports 0x0 during frame decode
-
-## VP9 Alpha Encoding Requirements
-
-For transparent WebM output, these FFmpeg flags are **required**:
-- `-pix_fmt yuva420p` — YUVA pixel format with alpha channel
-- `-auto-alt-ref 0` — disables alt-ref frames (required for alpha, otherwise encoder drops alpha)
-- `-metadata:s:v:0 alpha_mode=1` — signals the container has alpha
-
-Input mask PNGs **must** be RGBA format (alpha=0 for transparent, alpha=255 for opaque). The script auto-converts non-RGBA inputs and warns if alpha is flat.
-
-## Technical Details
-
-For implementation details (chromakey color selection, SAM3 post-processing, dimension matching, mask FFmpeg two-step process, known limitations), see [references/technical.md](references/technical.md).
+- **Technical details** (chromakey internals, SAM3 post-processing, VP9 encoding, mask FFmpeg two-step, known limitations): [references/technical.md](references/technical.md)
+- **Sett playable ads integration** (base64 data URL workaround, PixiJS video textures, landscape scaling bug fix): [references/sett-integration.md](references/sett-integration.md)
