@@ -229,13 +229,16 @@ def animate(image_path, prompt, model='kling', asset_type='character', subject=N
             download(get_url(sam_out), mask_video_path)
             log("done", "SAM3 mask extracted!")
 
-            print(f"\n[3/{total}] Alphamerge + VP9 encoding for mobile...")
+            # Force both streams to exact same dimensions (SAM3 mask may differ from generated video)
+            # format=gray on mask ensures alphamerge uses luminance; format=yuva420p ensures VP9 gets alpha
+            exact_scale = f'scale={crop_w}:{crop_h}'
+            print(f"\n[3/{total}] Alphamerge + VP9 encoding for mobile ({crop_w}x{crop_h})...")
             ffmpeg_cmd = [
                 'ffmpeg', '-y',
                 '-i', generated,
                 '-i', mask_video_path,
                 '-filter_complex',
-                f'[0:v]{scale}[vid];[1:v]{scale}[mask];[vid][mask]alphamerge[out]',
+                f'[0:v]{exact_scale}[vid];[1:v]{exact_scale},format=gray[mask];[vid][mask]alphamerge,format=yuva420p[out]',
                 '-map', '[out]',
                 '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p',
                 '-auto-alt-ref', '0', '-b:v', '800k', '-crf', '35',
