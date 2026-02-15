@@ -52,6 +52,7 @@ REPLICATE_API_TOKEN=$REPLICATE_API_TOKEN python3 ~/.claude/skills/character-anim
 | `--motion` | `auto`, `subtle`, `normal`, `expressive`, `dynamic` | `auto` | Controls animation intensity via cfg_scale. auto = `normal` for characters, `expressive` for backgrounds |
 | `--duration` | `5`, `10` | `5` | Seconds |
 | `--loop` | flag | **on** for backgrounds, off for characters | Seamless loop (Kling only). Use `--no-loop` to disable |
+| `--size` | `WxH` (e.g. `960x960`) | source dims | Output video dimensions. Use for backgrounds that must match the ad size exactly |
 | `--mask` | PNG path | none | Use PNG alpha as shape mask. Skips AI bg removal. **Static edges only** |
 | `--output` | file path | `<input>-animated.webm` | |
 
@@ -93,7 +94,7 @@ If the animation comes out too subtle, bump up `--motion` one level (e.g., `norm
    - **JPG/WEBP with solid-color background** (green screen, etc.) -> auto-detects bg color, chromakeys it out directly
    - **JPG/WEBP with complex background** -> `--method sam3` with `--subject` describing the character
    - **Logo / UI / static-edge asset** (edges don't move) -> `--mask <same_image.png>`
-   - **Background/scene** -> `--type background`
+   - **Background/scene** -> `--type background` (use `--size WxH` to match the ad dimensions)
    - **Ambiguous** -> ask the user
 3. For `--method sam3`, set `--subject` to describe what SAM3 should segment
 4. Choose motion level based on desired animation intensity (default `auto` is usually fine)

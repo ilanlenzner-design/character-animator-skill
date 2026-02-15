@@ -160,7 +160,7 @@ MOTION_PRESETS = {
 
 def animate(image_path, prompt, model='kling', asset_type='character', method='auto',
             subject=None, duration=5, output_path=None, loop=None, mask_path=None,
-            motion='auto'):
+            motion='auto', size=None):
     # Default: backgrounds always loop unless explicitly disabled
     if loop is None:
         loop = asset_type == 'background'
@@ -187,8 +187,7 @@ def animate(image_path, prompt, model='kling', asset_type='character', method='a
         base = os.path.splitext(os.path.basename(image_path))[0]
         output_path = os.path.join(os.path.dirname(os.path.abspath(image_path)), f"{base}-animated.webm")
 
-    # Match output dimensions to source image
-    # Characters capped at 720p for mobile; backgrounds use source dims (must fill screen)
+    # Output dimensions: --size overrides, else source dims (capped)
     # Render 15% oversized then center-crop to absorb AI-generated zoom drift
     src = Image.open(image_path)
     src_w, src_h = src.size
@@ -198,9 +197,13 @@ def animate(image_path, prompt, model='kling', asset_type='character', method='a
         alpha_range = alpha.getextrema()
         has_alpha = alpha_range[0] != alpha_range[1]  # flat alpha = no real transparency
     src.close()
-    max_dim = 1080 if asset_type == 'background' else 720
-    cap_w = min(src_w, max_dim)
-    cap_h = min(src_h, max_dim)
+    if size:
+        cap_w, cap_h = size
+        log("size", f"Using explicit size: {cap_w}x{cap_h}")
+    else:
+        max_dim = 1080 if asset_type == 'background' else 720
+        cap_w = min(src_w, max_dim)
+        cap_h = min(src_h, max_dim)
     oversized_w = int(cap_w * 1.15)
     oversized_h = int(cap_h * 1.15)
     # Make dimensions even (required by VP9)
@@ -460,9 +463,23 @@ if __name__ == '__main__':
                         default='auto',
                         help='Animation intensity: subtle (0.3), normal (0.5), expressive (0.7), dynamic (0.9). '
                              'auto = normal for characters, expressive for backgrounds')
+    parser.add_argument('--size', default=None,
+                        help='Output size WxH (e.g. 960x960, 1080x1920). Overrides source dims. '
+                             'Use for backgrounds that must match ad dimensions.')
     parser.add_argument('--mask', help='PNG with alpha channel to use as shape mask (skips AI bg removal)')
     parser.add_argument('--output', help='Output file path')
     args = parser.parse_args()
 
+    # Parse --size WxH into (w, h) tuple
+    parsed_size = None
+    if args.size:
+        try:
+            w, h = args.size.lower().split('x')
+            parsed_size = (int(w), int(h))
+        except (ValueError, AttributeError):
+            print(f"ERROR: Invalid --size format '{args.size}'. Use WxH (e.g. 960x960)")
+            sys.exit(1)
+
     animate(args.image, args.prompt, args.model, args.asset_type, args.method,
-            args.subject, args.duration, args.output, args.loop, args.mask, args.motion)
+            args.subject, args.duration, args.output, args.loop, args.mask, args.motion,
+            parsed_size)
