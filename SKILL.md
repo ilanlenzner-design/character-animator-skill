@@ -3,8 +3,8 @@ name: character-animator
 description: >
   Animate a character or background image into a mobile-optimized VP9 WebM video.
   Characters get alpha transparency; backgrounds get full-frame encoding.
-  Uses Kling or MiniMax via Replicate for AI video generation, with AI background
-  removal for characters. Output capped at 720p, low bitrate, optimized for mobile ads.
+  Uses Kling or MiniMax via Replicate for AI video generation, with auto-chromakey
+  or SAM3 segmentation for background removal. Output capped at 720p, optimized for mobile ads.
   Use when the user wants to (1) animate a character or sprite, (2) create a character
   animation with transparency, (3) animate a background image, (4) generate an animated
   video from a still image, (5) create a transparent video from a character image, or
@@ -16,13 +16,14 @@ description: >
 
 # Character Animator
 
-Animate a still image into a mobile-optimized VP9 WebM video (<=720p). Three pipelines:
+Animate a still image into a mobile-optimized VP9 WebM video (<=720p). Four pipelines:
 
 | Mode | Pipeline | Use for |
 |------|----------|---------|
-| **Character** | Image → AI Video → SAM3 segmentation → VP9+alpha | Sprites, characters, objects needing transparency |
-| **Mask** | Image → AI Video → PNG Alpha Mask → VP9+alpha | Logos, UI elements with static edges |
-| **Background** | Image → AI Video → VP9 encode | Scenes, landscapes, environments |
+| **Chromakey** (default for RGBA) | Scan image -> bake key color bg -> AI Video -> chromakey -> VP9+alpha | Characters/sprites with alpha channel (best quality) |
+| **SAM3** (fallback for JPG/WEBP) | Image -> AI Video -> SAM3 segmentation -> VP9+alpha | Characters without alpha (JPG, WEBP) |
+| **Mask** | Image -> AI Video -> PNG Alpha Mask -> VP9+alpha | Logos, UI elements with static edges |
+| **Background** | Image -> AI Video -> VP9 encode | Scenes, landscapes, environments |
 
 ## Usage
 
@@ -32,7 +33,6 @@ REPLICATE_API_TOKEN=$REPLICATE_API_TOKEN python3 ~/.claude/skills/character-anim
     --prompt "description of animation" \
     --type character \
     --model kling \
-    --subject "character" \
     --duration 5 \
     --loop \
     --output output.webm
@@ -45,12 +45,24 @@ REPLICATE_API_TOKEN=$REPLICATE_API_TOKEN python3 ~/.claude/skills/character-anim
 | `image_path` | PNG/JPG/WEBP path | (required) | |
 | `--prompt` | string | (required) | Describe the animation |
 | `--type` | `character`, `background` | `character` | character = transparent, background = full frame |
+| `--method` | `auto`, `chromakey`, `sam3` | `auto` | auto = chromakey if RGBA, SAM3 if no alpha |
 | `--model` | `kling`, `minimax` | `kling` | kling = best quality, minimax = faster |
-| `--subject` | string | `"character"` | SAM3 segmentation prompt. Examples: `"person"`, `"animal"`, `"car"`, `"hamster"` |
+| `--subject` | string | `"character"` | SAM3 segmentation prompt (only for `--method sam3`) |
 | `--duration` | `5`, `10` | `5` | Seconds |
 | `--loop` | flag | off | Seamless loop (Kling only). First frame = last frame via `end_image` |
 | `--mask` | PNG path | none | Use PNG alpha as shape mask. Skips AI bg removal. **Static edges only** |
 | `--output` | file path | `<input>-animated.webm` | |
+
+## How Chromakey Works
+
+When the source image has an alpha channel (RGBA PNG), the script automatically:
+1. **Scans** the opaque pixels to find the color most distant from any pixel in the image
+2. **Bakes** the character onto a flat background of that color (e.g., cyan for a green character)
+3. **Generates** the AI video with the baked image as `start_image` (and `end_image` for loops)
+4. **Chromakeys** the key color out with FFmpeg `chromakey` filter -> transparent VP9
+
+This produces sharper edges, more consistent frames, and no flickering compared to SAM3.
+No extra API call is needed (SAM3 is skipped entirely).
 
 ## Prompt Best Practices
 
@@ -62,14 +74,12 @@ REPLICATE_API_TOKEN=$REPLICATE_API_TOKEN python3 ~/.claude/skills/character-anim
 
 1. Get image path and animation prompt from user
 2. Determine transparency approach:
-   - **Logo / UI / static-edge asset** (edges don't move) → `--mask <same_image.png>`
-   - **Character/sprite** (moving edges) → `--type character`
-   - **Background/scene** → `--type background`
-   - **Ambiguous** → ask the user
-3. For `--type character`, set `--subject` to describe what SAM3 should segment:
-   - Person → `--subject "person"`
-   - Animal → `--subject "animal"` or be specific: `"hamster"`, `"fox"`
-   - Default `"character"` works for most game sprites
+   - **RGBA PNG character/sprite** -> auto-chromakey (default, best quality)
+   - **JPG/WEBP character** (no alpha) -> `--method sam3` with `--subject` describing the character
+   - **Logo / UI / static-edge asset** (edges don't move) -> `--mask <same_image.png>`
+   - **Background/scene** -> `--type background`
+   - **Ambiguous** -> ask the user
+3. For `--method sam3`, set `--subject` to describe what SAM3 should segment
 4. Default to `--loop` for game sprites and ad assets
 5. Verify `REPLICATE_API_TOKEN` is set
 6. Run `animate.py`
@@ -128,4 +138,4 @@ Input mask PNGs **must** be RGBA format (alpha=0 for transparent, alpha=255 for 
 
 ## Technical Details
 
-For implementation details (seamless looping internals, alpha erosion pipeline, dimension matching, mask FFmpeg two-step process, known limitations), see [references/technical.md](references/technical.md).
+For implementation details (chromakey color selection, SAM3 post-processing, dimension matching, mask FFmpeg two-step process, known limitations), see [references/technical.md](references/technical.md).

@@ -10,7 +10,8 @@ Usage:
 Options:
     --prompt       Animation prompt (required)
     --model        Video model: kling | minimax (default: kling)
-    --subject      SAM3 segmentation prompt (default: auto-detected from image)
+    --method       Transparency method: auto | chromakey | sam3 (default: auto)
+    --subject      SAM3 segmentation prompt (only for --method sam3)
     --duration     Video duration: 5 | 10 seconds (default: 5)
     --output       Output file path (default: <input_name>-animated.webm)
 
@@ -19,6 +20,7 @@ Requires:
     - FFmpeg installed on PATH
 """
 import argparse
+import math
 import os
 import shutil
 import subprocess
@@ -57,7 +59,56 @@ def log(step, msg):
     print(f"  [{step}] {msg}")
 
 
-def animate(image_path, prompt, model='kling', asset_type='character', subject=None, duration=5, output_path=None, loop=False, mask_path=None):
+def find_key_color(image_path):
+    """Scan an RGBA image and find the color most distant from any opaque pixel.
+    Returns (r, g, b) tuple and the hex string for FFmpeg chromakey."""
+    img = Image.open(image_path).convert('RGBA')
+    pixels = img.getdata()
+    opaque = [(r, g, b) for r, g, b, a in pixels if a > 128]
+    img.close()
+
+    if not opaque:
+        return (0, 255, 255), '0x00FFFF'  # fallback cyan
+
+    # Test candidate key colors and pick the one furthest from any pixel
+    candidates = [
+        (0, 255, 255),    # cyan
+        (255, 0, 255),    # magenta
+        (0, 0, 255),      # blue
+        (255, 0, 0),      # red
+        (255, 20, 147),   # hot pink
+    ]
+
+    best_color = None
+    best_dist = -1
+
+    for cr, cg, cb in candidates:
+        min_dist = float('inf')
+        for r, g, b in opaque:
+            dist = math.sqrt((r - cr) ** 2 + (g - cg) ** 2 + (b - cb) ** 2)
+            if dist < min_dist:
+                min_dist = dist
+        if min_dist > best_dist:
+            best_dist = min_dist
+            best_color = (cr, cg, cb)
+
+    r, g, b = best_color
+    hex_str = f'0x{r:02X}{g:02X}{b:02X}'
+    return best_color, hex_str
+
+
+def bake_background(image_path, key_color, dest_path):
+    """Composite an RGBA image over a flat key-color background, save as RGB PNG."""
+    char_img = Image.open(image_path).convert('RGBA')
+    bg = Image.new('RGBA', char_img.size, (*key_color, 255))
+    bg.paste(char_img, (0, 0), char_img)
+    bg.convert('RGB').save(dest_path)
+    char_img.close()
+    bg.close()
+
+
+def animate(image_path, prompt, model='kling', asset_type='character', method='auto',
+            subject=None, duration=5, output_path=None, loop=False, mask_path=None):
     if not os.environ.get('REPLICATE_API_TOKEN'):
         print("ERROR: REPLICATE_API_TOKEN environment variable is required")
         sys.exit(1)
@@ -78,6 +129,11 @@ def animate(image_path, prompt, model='kling', asset_type='character', subject=N
     # Render 15% oversized then center-crop to absorb AI-generated zoom drift
     src = Image.open(image_path)
     src_w, src_h = src.size
+    has_alpha = src.mode == 'RGBA'
+    if has_alpha:
+        alpha = src.getchannel('A')
+        alpha_range = alpha.getextrema()
+        has_alpha = alpha_range[0] != alpha_range[1]  # flat alpha = no real transparency
     src.close()
     cap_w = min(src_w, 720)
     cap_h = min(src_h, 720)
@@ -89,7 +145,19 @@ def animate(image_path, prompt, model='kling', asset_type='character', subject=N
     crop_w = cap_w + (cap_w % 2)
     crop_h = cap_h + (cap_h % 2)
     scale = f'scale={oversized_w}:{oversized_h}:force_original_aspect_ratio=decrease,crop={crop_w}:{crop_h}'
-    log("size", f"Source: {src_w}x{src_h} → Render: {oversized_w}x{oversized_h} → Crop: {crop_w}x{crop_h}")
+    log("size", f"Source: {src_w}x{src_h} -> Render: {oversized_w}x{oversized_h} -> Crop: {crop_w}x{crop_h}")
+
+    # Resolve auto method: chromakey if RGBA with alpha, else SAM3
+    if method == 'auto':
+        if mask_path:
+            method = 'mask'
+        elif asset_type == 'background':
+            method = 'background'
+        elif has_alpha:
+            method = 'chromakey'
+        else:
+            method = 'sam3'
+        log("method", f"Auto-selected: {method}" + (" (image has alpha)" if method == 'chromakey' else ""))
 
     if mask_path and not os.path.exists(mask_path):
         print(f"ERROR: Mask image not found: {mask_path}")
@@ -106,25 +174,38 @@ def animate(image_path, prompt, model='kling', asset_type='character', subject=N
             mask_img.close()
             mask_path = mask_path_rgba
         else:
-            # Validate alpha channel has both transparent and opaque pixels
             alpha = mask_img.getchannel('A')
             extrema = alpha.getextrema()
             mask_img.close()
             if extrema[0] == extrema[1]:
-                log("warn", f"Mask alpha is flat ({extrema[0]}) — no transparency variation. Output may lack cutout.")
+                log("warn", f"Mask alpha is flat ({extrema[0]}) -- no transparency variation. Output may lack cutout.")
             else:
-                log("mask", f"RGBA mask OK — alpha range [{extrema[0]}, {extrema[1]}]")
+                log("mask", f"RGBA mask OK -- alpha range [{extrema[0]}, {extrema[1]}]")
 
-    if mask_path:
-        total = 3
-    elif asset_type == 'background':
+    # Determine step count
+    if method == 'background':
         total = 2
+    elif method == 'chromakey':
+        total = 2  # generate (with baked bg) + chromakey encode
     else:
-        total = 3  # character: generate → SAM3 mask → alphamerge
+        total = 3  # generate + SAM3/mask + encode
 
     tmpdir = tempfile.mkdtemp(prefix="char-anim-")
 
     try:
+        # ── Chromakey: bake key color into source image before generation ──
+        gen_image_path = image_path
+        key_color = None
+        key_hex = None
+
+        if method == 'chromakey':
+            key_color, key_hex = find_key_color(image_path)
+            log("key", f"Best key color: RGB{key_color} ({key_hex}) -- most distant from all character pixels")
+            baked_path = os.path.join(tmpdir, 'baked_bg.png')
+            bake_background(image_path, key_color, baked_path)
+            gen_image_path = baked_path
+            log("bake", f"Character composited onto {key_hex} background")
+
         # ── Step 1: Generate video ──
         print(f"\n[1/{total}] Generating animation with {model}...")
 
@@ -132,7 +213,7 @@ def animate(image_path, prompt, model='kling', asset_type='character', subject=N
             model_id = 'kwaivgi/kling-v2.1'
             params = {
                 'prompt': prompt,
-                'start_image': open(image_path, 'rb'),
+                'start_image': open(gen_image_path, 'rb'),
                 'duration': int(duration),
                 'mode': 'standard',
                 'negative_prompt': 'blurry, distorted, low quality, watermark',
@@ -140,14 +221,14 @@ def animate(image_path, prompt, model='kling', asset_type='character', subject=N
                 'aspect_ratio': '16:9',
             }
             if loop:
-                params['end_image'] = open(image_path, 'rb')
+                params['end_image'] = open(gen_image_path, 'rb')
                 params['mode'] = 'pro'
                 log("loop", "Using start_image == end_image for seamless loop (mode=pro)")
         elif model == 'minimax':
             model_id = 'minimax/video-01'
             params = {
                 'prompt': prompt,
-                'first_frame_image': open(image_path, 'rb'),
+                'first_frame_image': open(gen_image_path, 'rb'),
                 'prompt_optimizer': True,
             }
         else:
@@ -162,13 +243,12 @@ def animate(image_path, prompt, model='kling', asset_type='character', subject=N
         download(video_url, generated)
         log("done", "Animation generated!")
 
-        if mask_path:
+        if method == 'mask':
             # ── MASK PATH: use original PNG alpha as mask ──
             mask_img = Image.open(mask_path)
             mask_w, mask_h = mask_img.size
             mask_img.close()
             log("mask", f"Mask input: {mask_w}x{mask_h}, format confirmed RGBA")
-            # Make dimensions even for VP9
             out_w = mask_w + (mask_w % 2)
             out_h = mask_h + (mask_h % 2)
 
@@ -187,7 +267,7 @@ def animate(image_path, prompt, model='kling', asset_type='character', subject=N
                 sys.exit(1)
             log("done", f"Mask video created ({out_w}x{out_h})")
 
-            print(f"\n[3/{total}] Masking video with PNG alpha → transparent VP9...")
+            print(f"\n[3/{total}] Masking video with PNG alpha -> transparent VP9...")
             ffmpeg_cmd = [
                 'ffmpeg', '-y',
                 '-i', generated,
@@ -202,7 +282,7 @@ def animate(image_path, prompt, model='kling', asset_type='character', subject=N
                 output_path,
             ]
 
-        elif asset_type == 'background':
+        elif method == 'background':
             # ── BACKGROUND PATH: no matting, encode for mobile ──
             print(f"\n[2/{total}] Encoding VP9 for mobile (<=720p)...")
             ffmpeg_cmd = [
@@ -213,8 +293,22 @@ def animate(image_path, prompt, model='kling', asset_type='character', subject=N
                 output_path,
             ]
 
+        elif method == 'chromakey':
+            # ── CHROMAKEY PATH: remove baked key color ──
+            print(f"\n[2/{total}] Chromakey {key_hex} -> transparent VP9 ({crop_w}x{crop_h})...")
+            ffmpeg_cmd = [
+                'ffmpeg', '-y',
+                '-i', generated,
+                '-vf', f'scale={crop_w}:{crop_h},chromakey={key_hex}:0.15:0.1,format=yuva420p',
+                '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p',
+                '-auto-alt-ref', '0', '-b:v', '800k', '-crf', '35',
+                '-speed', '4', '-row-mt', '1',
+                '-metadata:s:v:0', 'alpha_mode=1', '-an',
+                output_path,
+            ]
+
         else:
-            # ── CHARACTER PATH: SAM3 Video segmentation ──
+            # ── SAM3 PATH: AI video segmentation (fallback for non-RGBA images) ──
             sam_prompt = subject or 'character'
             print(f"\n[2/{total}] Segmenting subject with SAM3 (prompt: '{sam_prompt}')...")
             sam_out = replicate.run(
@@ -229,8 +323,9 @@ def animate(image_path, prompt, model='kling', asset_type='character', subject=N
             download(get_url(sam_out), mask_video_path)
             log("done", "SAM3 mask extracted!")
 
-            # Force both streams to exact same dimensions (SAM3 mask may differ from generated video)
-            # format=gray on mask ensures alphamerge uses luminance; format=yuva420p ensures VP9 gets alpha
+            # Force both streams to exact same dimensions
+            # tmix=frames=5 temporally smooths the mask to eliminate flicker
+            # inflate x3 dilates the mask ~3px to recover edges SAM3 may have clipped
             exact_scale = f'scale={crop_w}:{crop_h}'
             print(f"\n[3/{total}] Alphamerge + VP9 encoding for mobile ({crop_w}x{crop_h})...")
             ffmpeg_cmd = [
@@ -238,7 +333,7 @@ def animate(image_path, prompt, model='kling', asset_type='character', subject=N
                 '-i', generated,
                 '-i', mask_video_path,
                 '-filter_complex',
-                f'[0:v]{exact_scale}[vid];[1:v]{exact_scale},format=gray[mask];[vid][mask]alphamerge,format=yuva420p[out]',
+                f'[0:v]{exact_scale}[vid];[1:v]{exact_scale},format=gray,tmix=frames=5,inflate,inflate,inflate[mask];[vid][mask]alphamerge,format=yuva420p[out]',
                 '-map', '[out]',
                 '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p',
                 '-auto-alt-ref', '0', '-b:v', '800k', '-crf', '35',
@@ -255,7 +350,10 @@ def animate(image_path, prompt, model='kling', asset_type='character', subject=N
 
         size_mb = round(os.path.getsize(output_path) / (1024 * 1024), 2)
         print(f"\nDone! Output: {output_path} ({size_mb} MB)")
-        print(f"Format: VP9 WebM with alpha transparency")
+        if asset_type == 'background':
+            print(f"Format: VP9 WebM (opaque)")
+        else:
+            print(f"Format: VP9 WebM with alpha transparency")
         return output_path
 
     finally:
@@ -267,6 +365,8 @@ if __name__ == '__main__':
     parser.add_argument('image', help='Path to image (PNG/JPG/WEBP)')
     parser.add_argument('--prompt', required=True, help='Animation prompt')
     parser.add_argument('--model', choices=['kling', 'minimax'], default='kling')
+    parser.add_argument('--method', choices=['auto', 'chromakey', 'sam3'], default='auto',
+                        help='Transparency method: auto (chromakey if RGBA, else SAM3), chromakey, or sam3')
     parser.add_argument('--type', dest='asset_type', choices=['character', 'background'], default='character',
                         help='character = transparent output, background = full frame')
     parser.add_argument('--subject', default=None,
@@ -277,4 +377,5 @@ if __name__ == '__main__':
     parser.add_argument('--output', help='Output file path')
     args = parser.parse_args()
 
-    animate(args.image, args.prompt, args.model, args.asset_type, args.subject, args.duration, args.output, args.loop, args.mask)
+    animate(args.image, args.prompt, args.model, args.asset_type, args.method,
+            args.subject, args.duration, args.output, args.loop, args.mask)
