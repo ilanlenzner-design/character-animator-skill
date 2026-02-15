@@ -97,6 +97,49 @@ def find_key_color(image_path):
     return best_color, hex_str
 
 
+def detect_solid_background(image_path, tolerance=30, min_edge_ratio=0.65):
+    """Check if an RGB image has a solid-color background by sampling edge pixels.
+    Returns (key_color, hex_str) if a dominant edge color is found, or (None, None)."""
+    img = Image.open(image_path).convert('RGB')
+    w, h = img.size
+    pixels = img.load()
+
+    # Sample all pixels along the 4 edges
+    edge_pixels = []
+    for x in range(w):
+        edge_pixels.append(pixels[x, 0])           # top row
+        edge_pixels.append(pixels[x, h - 1])       # bottom row
+    for y in range(1, h - 1):
+        edge_pixels.append(pixels[0, y])            # left column
+        edge_pixels.append(pixels[w - 1, y])        # right column
+    img.close()
+
+    if not edge_pixels:
+        return None, None
+
+    # Find the most common edge color (within tolerance)
+    # Group similar colors together
+    from collections import Counter
+    color_counts = Counter(edge_pixels)
+    dominant_color, dominant_count = color_counts.most_common(1)[0]
+
+    # Count how many edge pixels are within tolerance of the dominant color
+    dr, dg, db = dominant_color
+    close_count = 0
+    for r, g, b in edge_pixels:
+        dist = math.sqrt((r - dr) ** 2 + (g - dg) ** 2 + (b - db) ** 2)
+        if dist <= tolerance:
+            close_count += 1
+
+    ratio = close_count / len(edge_pixels)
+    if ratio >= min_edge_ratio:
+        r, g, b = dominant_color
+        hex_str = f'0x{r:02X}{g:02X}{b:02X}'
+        return dominant_color, hex_str
+
+    return None, None
+
+
 def bake_background(image_path, key_color, dest_path):
     """Composite an RGBA image over a flat key-color background, save as RGB PNG."""
     char_img = Image.open(image_path).convert('RGBA')
@@ -108,7 +151,11 @@ def bake_background(image_path, key_color, dest_path):
 
 
 def animate(image_path, prompt, model='kling', asset_type='character', method='auto',
-            subject=None, duration=5, output_path=None, loop=False, mask_path=None):
+            subject=None, duration=5, output_path=None, loop=None, mask_path=None):
+    # Default: backgrounds always loop unless explicitly disabled
+    if loop is None:
+        loop = asset_type == 'background'
+
     if not os.environ.get('REPLICATE_API_TOKEN'):
         print("ERROR: REPLICATE_API_TOKEN environment variable is required")
         sys.exit(1)
@@ -147,7 +194,8 @@ def animate(image_path, prompt, model='kling', asset_type='character', method='a
     scale = f'scale={oversized_w}:{oversized_h}:force_original_aspect_ratio=decrease,crop={crop_w}:{crop_h}'
     log("size", f"Source: {src_w}x{src_h} -> Render: {oversized_w}x{oversized_h} -> Crop: {crop_w}x{crop_h}")
 
-    # Resolve auto method: chromakey if RGBA with alpha, else SAM3
+    # Resolve auto method: chromakey if RGBA with alpha, solid-bg chromakey if detectable, else SAM3
+    detected_bg = None
     if method == 'auto':
         if mask_path:
             method = 'mask'
@@ -156,8 +204,15 @@ def animate(image_path, prompt, model='kling', asset_type='character', method='a
         elif has_alpha:
             method = 'chromakey'
         else:
-            method = 'sam3'
-        log("method", f"Auto-selected: {method}" + (" (image has alpha)" if method == 'chromakey' else ""))
+            # No alpha -- check if image has a solid-color background we can chromakey directly
+            detected_bg, detected_hex = detect_solid_background(image_path)
+            if detected_bg is not None:
+                method = 'chromakey'
+                log("method", f"Auto-selected: chromakey (detected solid background {detected_hex})")
+            else:
+                method = 'sam3'
+        if method != 'chromakey' or detected_bg is None:
+            log("method", f"Auto-selected: {method}" + (" (image has alpha)" if method == 'chromakey' and has_alpha else ""))
 
     if mask_path and not os.path.exists(mask_path):
         print(f"ERROR: Mask image not found: {mask_path}")
@@ -199,12 +254,19 @@ def animate(image_path, prompt, model='kling', asset_type='character', method='a
         key_hex = None
 
         if method == 'chromakey':
-            key_color, key_hex = find_key_color(image_path)
-            log("key", f"Best key color: RGB{key_color} ({key_hex}) -- most distant from all character pixels")
-            baked_path = os.path.join(tmpdir, 'baked_bg.png')
-            bake_background(image_path, key_color, baked_path)
-            gen_image_path = baked_path
-            log("bake", f"Character composited onto {key_hex} background")
+            if detected_bg is not None:
+                # Solid background detected in RGB image -- use it directly as key color
+                key_color = detected_bg
+                key_hex = detected_hex
+                log("key", f"Using detected background color: RGB{key_color} ({key_hex}) -- no baking needed")
+            else:
+                # RGBA image -- find best key color and bake it
+                key_color, key_hex = find_key_color(image_path)
+                log("key", f"Best key color: RGB{key_color} ({key_hex}) -- most distant from all character pixels")
+                baked_path = os.path.join(tmpdir, 'baked_bg.png')
+                bake_background(image_path, key_color, baked_path)
+                gen_image_path = baked_path
+                log("bake", f"Character composited onto {key_hex} background")
 
         # ── Step 1: Generate video ──
         print(f"\n[1/{total}] Generating animation with {model}...")
@@ -372,7 +434,11 @@ if __name__ == '__main__':
     parser.add_argument('--subject', default=None,
                         help='SAM3 segmentation prompt (e.g. "person", "animal", "car"). Default: "character"')
     parser.add_argument('--duration', type=int, choices=[5, 10], default=5)
-    parser.add_argument('--loop', action='store_true', help='Use start_image == end_image for seamless loop (Kling v2.5)')
+    loop_group = parser.add_mutually_exclusive_group()
+    loop_group.add_argument('--loop', action='store_true', default=None, dest='loop',
+                            help='Force seamless loop (default for backgrounds)')
+    loop_group.add_argument('--no-loop', action='store_false', dest='loop',
+                            help='Disable looping (override default for backgrounds)')
     parser.add_argument('--mask', help='PNG with alpha channel to use as shape mask (skips AI bg removal)')
     parser.add_argument('--output', help='Output file path')
     args = parser.parse_args()

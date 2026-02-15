@@ -45,11 +45,11 @@ REPLICATE_API_TOKEN=$REPLICATE_API_TOKEN python3 ~/.claude/skills/character-anim
 | `image_path` | PNG/JPG/WEBP path | (required) | |
 | `--prompt` | string | (required) | Describe the animation |
 | `--type` | `character`, `background` | `character` | character = transparent, background = full frame |
-| `--method` | `auto`, `chromakey`, `sam3` | `auto` | auto = chromakey if RGBA, SAM3 if no alpha |
+| `--method` | `auto`, `chromakey`, `sam3` | `auto` | auto = chromakey if RGBA or solid-color bg, SAM3 only if complex bg |
 | `--model` | `kling`, `minimax` | `kling` | kling = best quality, minimax = faster |
 | `--subject` | string | `"character"` | SAM3 segmentation prompt (only for `--method sam3`) |
 | `--duration` | `5`, `10` | `5` | Seconds |
-| `--loop` | flag | off | Seamless loop (Kling only). First frame = last frame via `end_image` |
+| `--loop` | flag | **on** for backgrounds, off for characters | Seamless loop (Kling only). Use `--no-loop` to disable |
 | `--mask` | PNG path | none | Use PNG alpha as shape mask. Skips AI bg removal. **Static edges only** |
 | `--output` | file path | `<input>-animated.webm` | |
 
@@ -75,7 +75,8 @@ No extra API call is needed (SAM3 is skipped entirely).
 1. Get image path and animation prompt from user
 2. Determine transparency approach:
    - **RGBA PNG character/sprite** -> auto-chromakey (default, best quality)
-   - **JPG/WEBP character** (no alpha) -> `--method sam3` with `--subject` describing the character
+   - **JPG/WEBP with solid-color background** (green screen, etc.) -> auto-detects bg color, chromakeys it out directly
+   - **JPG/WEBP with complex background** -> `--method sam3` with `--subject` describing the character
    - **Logo / UI / static-edge asset** (edges don't move) -> `--mask <same_image.png>`
    - **Background/scene** -> `--type background`
    - **Ambiguous** -> ask the user
