@@ -119,6 +119,7 @@ These flags are already set in all three alpha-encoding paths (character univers
 
 ## Known Limitations
 
+- **iOS VP9 alpha**: iOS Safari does **not** support VP9 WebM alpha transparency. Transparent videos show a black background on iPhone/iPad. Use the stacked-alpha H.264 approach for cross-platform playable ads. See [sett-integration.md](sett-integration.md#ios-transparency-stacked-alpha-h264).
 - **SAM3 prompt sensitivity**: The `--subject` prompt affects segmentation quality. Be specific (e.g. `"hamster"` not `"character"`) for best results.
 - **Kling frame-filling**: Kling tends to expand subjects to fill the frame, especially logos/panels. Use `--mask` for logos to preserve the original shape.
 - **MiniMax no looping**: MiniMax does not support `end_image`, so `--loop` is Kling-only.

@@ -2,7 +2,8 @@
 """
 Character Animator Pipeline
 Animates a character image using AI video generation, removes the background,
-and outputs a VP9 WebM with alpha transparency.
+and outputs a VP9 WebM with alpha transparency and/or a stacked-alpha H.264 MP4
+for iOS compatibility.
 
 Usage:
     python3 animate.py <image_path> --prompt "description of animation" [options]
@@ -13,7 +14,8 @@ Options:
     --method       Transparency method: auto | chromakey | sam3 (default: auto)
     --subject      SAM3 segmentation prompt (only for --method sam3)
     --duration     Video duration: 5 | 10 seconds (default: 5)
-    --output       Output file path (default: <input_name>-animated.webm)
+    --format       Output format: webm | mp4 | both (default: webm)
+    --output       Output file path (default: <input_name>-animated.<ext>)
 
 Requires:
     - REPLICATE_API_TOKEN environment variable
@@ -160,7 +162,7 @@ MOTION_PRESETS = {
 
 def animate(image_path, prompt, model='kling', asset_type='character', method='auto',
             subject=None, duration=5, output_path=None, loop=None, mask_path=None,
-            motion='auto', size=None):
+            motion='auto', size=None, fmt='webm'):
     # Default: backgrounds always loop unless explicitly disabled
     if loop is None:
         loop = asset_type == 'background'
@@ -185,7 +187,8 @@ def animate(image_path, prompt, model='kling', asset_type='character', method='a
 
     if output_path is None:
         base = os.path.splitext(os.path.basename(image_path))[0]
-        output_path = os.path.join(os.path.dirname(os.path.abspath(image_path)), f"{base}-animated.webm")
+        ext = '.mp4' if fmt == 'mp4' else '.webm'
+        output_path = os.path.join(os.path.dirname(os.path.abspath(image_path)), f"{base}-animated{ext}")
 
     # Output dimensions: --size overrides, else source dims (capped)
     # Render 15% oversized then center-crop to absorb AI-generated zoom drift
@@ -206,7 +209,7 @@ def animate(image_path, prompt, model='kling', asset_type='character', method='a
         cap_h = min(src_h, max_dim)
     oversized_w = int(cap_w * 1.15)
     oversized_h = int(cap_h * 1.15)
-    # Make dimensions even (required by VP9)
+    # Make dimensions even (required by VP9 and H.264)
     oversized_w += oversized_w % 2
     oversized_h += oversized_h % 2
     crop_w = cap_w + (cap_w % 2)
@@ -265,7 +268,25 @@ def animate(image_path, prompt, model='kling', asset_type='character', method='a
     else:
         total = 3  # generate + SAM3/mask + encode
 
+    # Add an extra step if we need both WebM and MP4
+    need_mp4 = fmt in ('mp4', 'both')
+    if need_mp4:
+        total += 1
+
     tmpdir = tempfile.mkdtemp(prefix="char-anim-")
+
+    # Determine encoding targets and output paths
+    if fmt == 'mp4':
+        mp4_path = output_path
+        webm_target = os.path.join(tmpdir, 'temp.webm')
+    elif fmt == 'both':
+        mp4_path = os.path.splitext(output_path)[0] + '.mp4'
+        webm_target = output_path
+    else:
+        mp4_path = None
+        webm_target = output_path
+
+    log("format", f"Output format: {fmt}" + (f" (WebM: {webm_target})" if fmt != 'mp4' else "") + (f" (MP4: {mp4_path})" if mp4_path else ""))
 
     try:
         # ── Chromakey: bake key color into source image before generation ──
@@ -289,7 +310,8 @@ def animate(image_path, prompt, model='kling', asset_type='character', method='a
                 log("bake", f"Character composited onto {key_hex} background")
 
         # ── Step 1: Generate video ──
-        print(f"\n[1/{total}] Generating animation with {model}...")
+        current_step = 1
+        print(f"\n[{current_step}/{total}] Generating animation with {model}...")
 
         if model == 'kling':
             model_id = 'kwaivgi/kling-v2.1'
@@ -334,7 +356,8 @@ def animate(image_path, prompt, model='kling', asset_type='character', method='a
             out_w = mask_w + (mask_w % 2)
             out_h = mask_h + (mask_h % 2)
 
-            print(f"\n[2/{total}] Creating alpha mask video from {os.path.basename(mask_path)}...")
+            current_step += 1
+            print(f"\n[{current_step}/{total}] Creating alpha mask video from {os.path.basename(mask_path)}...")
             mask_video = os.path.join(tmpdir, 'mask.mp4')
             mask_cmd = [
                 'ffmpeg', '-y', '-loop', '1', '-i', mask_path,
@@ -349,7 +372,8 @@ def animate(image_path, prompt, model='kling', asset_type='character', method='a
                 sys.exit(1)
             log("done", f"Mask video created ({out_w}x{out_h})")
 
-            print(f"\n[3/{total}] Masking video with PNG alpha -> transparent VP9...")
+            current_step += 1
+            print(f"\n[{current_step}/{total}] Masking video with PNG alpha -> transparent VP9...")
             ffmpeg_cmd = [
                 'ffmpeg', '-y',
                 '-i', generated,
@@ -361,23 +385,25 @@ def animate(image_path, prompt, model='kling', asset_type='character', method='a
                 '-speed', '4', '-row-mt', '1',
                 '-metadata:s:v:0', 'alpha_mode=1', '-an',
                 '-shortest',
-                output_path,
+                webm_target,
             ]
 
         elif method == 'background':
             # ── BACKGROUND PATH: no matting, encode for mobile ──
-            print(f"\n[2/{total}] Encoding VP9 for mobile (<=720p)...")
+            current_step += 1
+            print(f"\n[{current_step}/{total}] Encoding VP9 for mobile (<=720p)...")
             ffmpeg_cmd = [
                 'ffmpeg', '-y', '-i', generated,
                 '-vf', scale,
                 '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuv420p',
                 '-b:v', '600k', '-crf', '36', '-speed', '4', '-row-mt', '1', '-an',
-                output_path,
+                webm_target,
             ]
 
         elif method == 'chromakey':
             # ── CHROMAKEY PATH: remove baked key color ──
-            print(f"\n[2/{total}] Chromakey {key_hex} -> transparent VP9 ({crop_w}x{crop_h})...")
+            current_step += 1
+            print(f"\n[{current_step}/{total}] Chromakey {key_hex} -> transparent VP9 ({crop_w}x{crop_h})...")
             ffmpeg_cmd = [
                 'ffmpeg', '-y',
                 '-i', generated,
@@ -386,13 +412,14 @@ def animate(image_path, prompt, model='kling', asset_type='character', method='a
                 '-auto-alt-ref', '0', '-b:v', '800k', '-crf', '35',
                 '-speed', '4', '-row-mt', '1',
                 '-metadata:s:v:0', 'alpha_mode=1', '-an',
-                output_path,
+                webm_target,
             ]
 
         else:
             # ── SAM3 PATH: AI video segmentation (fallback for non-RGBA images) ──
             sam_prompt = subject or 'character'
-            print(f"\n[2/{total}] Segmenting subject with SAM3 (prompt: '{sam_prompt}')...")
+            current_step += 1
+            print(f"\n[{current_step}/{total}] Segmenting subject with SAM3 (prompt: '{sam_prompt}')...")
             sam_out = replicate.run(
                 'lucataco/sam3-video:8cbab4c2a3133e679b5b863b80527f6b5c751ec7b33681b7e0b7c79c749df961',
                 input={
@@ -409,7 +436,8 @@ def animate(image_path, prompt, model='kling', asset_type='character', method='a
             # tmix=frames=5 temporally smooths the mask to eliminate flicker
             # inflate x3 dilates the mask ~3px to recover edges SAM3 may have clipped
             exact_scale = f'scale={crop_w}:{crop_h}'
-            print(f"\n[3/{total}] Alphamerge + VP9 encoding for mobile ({crop_w}x{crop_h})...")
+            current_step += 1
+            print(f"\n[{current_step}/{total}] Alphamerge + VP9 encoding for mobile ({crop_w}x{crop_h})...")
             ffmpeg_cmd = [
                 'ffmpeg', '-y',
                 '-i', generated,
@@ -422,7 +450,7 @@ def animate(image_path, prompt, model='kling', asset_type='character', method='a
                 '-speed', '4', '-row-mt', '1',
                 '-metadata:s:v:0', 'alpha_mode=1', '-an',
                 '-shortest',
-                output_path,
+                webm_target,
             ]
 
         result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=600)
@@ -430,13 +458,82 @@ def animate(image_path, prompt, model='kling', asset_type='character', method='a
             print(f"ERROR: FFmpeg failed:\n{result.stderr[-500:]}")
             sys.exit(1)
 
-        size_mb = round(os.path.getsize(output_path) / (1024 * 1024), 2)
-        print(f"\nDone! Output: {output_path} ({size_mb} MB)")
-        if asset_type == 'background':
-            print(f"Format: VP9 WebM (opaque)")
-        else:
-            print(f"Format: VP9 WebM with alpha transparency")
-        return output_path
+        webm_size = round(os.path.getsize(webm_target) / (1024 * 1024), 2)
+
+        if fmt != 'mp4':
+            # Report WebM output (skip for mp4-only since it's a temp file)
+            if asset_type == 'background':
+                log("webm", f"VP9 WebM (opaque): {webm_target} ({webm_size} MB)")
+            else:
+                log("webm", f"VP9 WebM + alpha: {webm_target} ({webm_size} MB)")
+
+        # ── Stacked-alpha MP4 encoding (for iOS compatibility) ──
+        if need_mp4:
+            current_step += 1
+
+            if method == 'background':
+                # Background: no alpha, just re-encode as H.264 for universal playback
+                print(f"\n[{current_step}/{total}] Encoding H.264 MP4 (opaque)...")
+                mp4_cmd = [
+                    'ffmpeg', '-y', '-i', webm_target,
+                    '-c:v', 'libx264', '-preset', 'veryslow', '-crf', '26',
+                    '-pix_fmt', 'yuv420p', '-an',
+                    mp4_path,
+                ]
+            else:
+                # Character/mask: stacked-alpha H.264 for iOS transparency
+                # Top half = RGB (character on key-color/scene background)
+                # Bottom half = alpha channel as grayscale (white=opaque, black=transparent)
+                print(f"\n[{current_step}/{total}] Encoding stacked-alpha H.264 MP4 (iOS-compatible)...")
+                mp4_cmd = [
+                    'ffmpeg', '-y', '-i', webm_target,
+                    '-filter_complex',
+                    '[0:v]split[rgb][a];'
+                    '[a]alphaextract[amask];'
+                    '[rgb]format=rgb24,pad=iw:ih*2[padded];'
+                    '[padded][amask]overlay=0:h',
+                    '-c:v', 'libx264', '-preset', 'veryslow', '-crf', '26',
+                    '-pix_fmt', 'yuv420p', '-an',
+                    mp4_path,
+                ]
+
+            result = subprocess.run(mp4_cmd, capture_output=True, text=True, timeout=600)
+            if result.returncode != 0:
+                print(f"ERROR: Stacked MP4 encoding failed:\n{result.stderr[-500:]}")
+                sys.exit(1)
+
+            mp4_size = round(os.path.getsize(mp4_path) / (1024 * 1024), 2)
+
+            if method == 'background':
+                log("mp4", f"H.264 MP4 (opaque): {mp4_path} ({mp4_size} MB)")
+            else:
+                log("mp4", f"Stacked-alpha H.264: {mp4_path} ({mp4_size} MB)")
+                log("note", "Requires AlphaPackFilter shader to render transparency (see sett-integration.md)")
+
+        # ── Final summary ──
+        print(f"\nDone!")
+        if fmt == 'webm':
+            print(f"Output: {output_path} ({webm_size} MB)")
+            if asset_type == 'background':
+                print(f"Format: VP9 WebM (opaque)")
+            else:
+                print(f"Format: VP9 WebM with alpha transparency")
+        elif fmt == 'mp4':
+            print(f"Output: {mp4_path} ({mp4_size} MB)")
+            if method == 'background':
+                print(f"Format: H.264 MP4 (opaque)")
+            else:
+                print(f"Format: Stacked-alpha H.264 MP4 (iOS + Android)")
+                print(f"Video dimensions: {crop_w}x{crop_h * 2} (top=RGB, bottom=alpha)")
+                print(f"Display dimensions: {crop_w}x{crop_h}")
+        else:  # both
+            print(f"WebM:  {output_path} ({webm_size} MB)")
+            print(f"MP4:   {mp4_path} ({mp4_size} MB)")
+            if method != 'background':
+                print(f"MP4 video dimensions: {crop_w}x{crop_h * 2} (top=RGB, bottom=alpha)")
+                print(f"MP4 display dimensions: {crop_w}x{crop_h}")
+
+        return output_path if fmt != 'mp4' else mp4_path
 
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -467,6 +564,9 @@ if __name__ == '__main__':
                         help='Output size WxH (e.g. 960x960, 1080x1920). Overrides source dims. '
                              'Use for backgrounds that must match ad dimensions.')
     parser.add_argument('--mask', help='PNG with alpha channel to use as shape mask (skips AI bg removal)')
+    parser.add_argument('--format', dest='fmt', choices=['webm', 'mp4', 'both'], default='webm',
+                        help='Output format: webm (VP9+alpha), mp4 (stacked-alpha H.264 for iOS), '
+                             'both (outputs both files)')
     parser.add_argument('--output', help='Output file path')
     args = parser.parse_args()
 
@@ -482,4 +582,4 @@ if __name__ == '__main__':
 
     animate(args.image, args.prompt, args.model, args.asset_type, args.method,
             args.subject, args.duration, args.output, args.loop, args.mask, args.motion,
-            parsed_size)
+            parsed_size, args.fmt)
